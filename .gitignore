@@ -1,0 +1,14 @@
+/vendor/
+/.idea/
+/.vscode/
+.env
+*.zip
+*.log
+/storage/app/*
+!/storage/app/.gitkeep
+/storage/logs/*
+!/storage/logs/.gitkeep
+/storage/tmp/*
+!/storage/tmp/.gitkeep
+/database/*.sqlite
+/database/*.sqlite-journal

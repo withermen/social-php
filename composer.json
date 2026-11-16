@@ -1,0 +1,33 @@
+{
+    "name": "withermen/social-php",
+    "description": "Self-hosted social video backend API for PHP",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "social",
+        "video",
+        "api",
+        "feed",
+        "php"
+    ],
+    "require": {
+        "php": ">=8.1",
+        "ext-json": "*",
+        "ext-pdo": "*",
+        "ext-fileinfo": "*",
+        "ext-mbstring": "*"
+    },
+    "suggest": {
+        "ext-gd": "Avatar resizing and fallback video thumbnails",
+        "ext-pdo_mysql": "MySQL support",
+        "ext-pdo_sqlite": "SQLite support"
+    },
+    "autoload": {
+        "psr-4": {
+            "Social\\": "src/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
