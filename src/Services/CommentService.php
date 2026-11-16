@@ -121,6 +121,7 @@ final class CommentService
 
         $this->notifyMentions($user, $videoId, $id, $clean['body']);
         $this->app->analysis()->recordSignal($user['id'], $videoId, 'comment');
+        $this->app->recommendations()->recordEngagement($videoId, 'comment', 1);
 
         return $this->mapRows([$this->find($id)], $user['id'], false)[0];
     }

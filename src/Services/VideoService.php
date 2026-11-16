@@ -169,22 +169,26 @@ final class VideoService
         return $this->app->analysis()->get($id, $viewerId);
     }
 
-    public function watch(?array $user, string $id, int $position, int $duration): array
+    public function watch(?array $user, string $id, int $position, int $duration, ?string $sessionId = null, ?string $event = null, bool $replayed = false): array
     {
         $this->findAccessible($id, $user['id'] ?? null);
 
         if ($user === null) {
             return [
                 'video_id' => $id,
+                'session_id' => $sessionId,
+                'event' => $event,
                 'position_seconds' => max(0, $position),
                 'duration_seconds' => max(0, $duration),
                 'watch_ratio' => 0.0,
                 'completed' => false,
+                'skipped' => false,
+                'replayed' => $replayed,
                 'personalized' => false,
             ];
         }
 
-        return $this->app->analysis()->recordWatch($user, $id, $position, $duration);
+        return $this->app->analysis()->recordWatch($user, $id, $position, $duration, $sessionId, $event, $replayed);
     }
 
     public function findAccessible(string $id, ?string $viewerId): array
@@ -357,6 +361,7 @@ final class VideoService
                 $this->app->db()->run('UPDATE videos SET like_count = like_count + 1 WHERE id = ?', [$id]);
             });
             $this->app->analysis()->recordSignal($user['id'], $id, 'like');
+            $this->app->recommendations()->recordEngagement($id, 'like', 1);
             $this->app->notifications()->create($row['user_id'], $user['id'], 'like', 'video', $id, [
                 'title' => $row['title'],
                 'thumbnail_url' => $row['thumbnail_path'] ? $this->app->assetUrl($row['thumbnail_path']) : null,
@@ -385,6 +390,7 @@ final class VideoService
                 );
             });
             $this->app->analysis()->recordSignal($user['id'], $id, 'unlike');
+            $this->app->recommendations()->recordEngagement($id, 'like', -1);
         }
 
         $count = (int) $this->app->db()->value('SELECT like_count FROM videos WHERE id = ?', [$id]);
@@ -407,6 +413,7 @@ final class VideoService
                 $this->app->db()->run('UPDATE videos SET save_count = save_count + 1 WHERE id = ?', [$id]);
             });
             $this->app->analysis()->recordSignal($user['id'], $id, 'save');
+            $this->app->recommendations()->recordEngagement($id, 'save', 1);
         }
 
         $count = (int) $this->app->db()->value('SELECT save_count FROM videos WHERE id = ?', [$id]);
@@ -427,6 +434,7 @@ final class VideoService
                 );
             });
             $this->app->analysis()->recordSignal($user['id'], $id, 'unsave');
+            $this->app->recommendations()->recordEngagement($id, 'save', -1);
         }
 
         $count = (int) $this->app->db()->value('SELECT save_count FROM videos WHERE id = ?', [$id]);
@@ -452,6 +460,8 @@ final class VideoService
             ]);
             $this->app->db()->run('UPDATE videos SET share_count = share_count + 1 WHERE id = ?', [$id]);
         });
+
+        $this->app->recommendations()->recordEngagement($id, 'share', 1);
 
         if ($user !== null) {
             $this->app->analysis()->recordSignal($user['id'], $id, 'share');

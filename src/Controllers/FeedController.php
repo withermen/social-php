@@ -11,41 +11,41 @@ final class FeedController extends Controller
     public function following(Request $request): Response
     {
         [$page, $perPage] = Validator::pagination($request->query, 20, 100);
-        $result = $this->app->feeds()->following($request->user(), $page, $perPage, $this->format($request));
+        $result = $this->app->feeds()->following($request->user(), $page, $perPage, $this->format($request), $this->sessionId($request));
 
-        return $this->paginated($result, ['algorithm' => $result['algorithm'], 'format' => $result['format']]);
+        return $this->paginated($result, ['algorithm' => $result['algorithm'], 'format' => $result['format'], 'session_id' => $result['session_id']]);
     }
 
     public function forYou(Request $request): Response
     {
         [$page, $perPage] = Validator::pagination($request->query, 20, 100);
-        $result = $this->app->feeds()->forYou($request->user(), $page, $perPage, $this->format($request));
+        $result = $this->app->feeds()->forYou($request->user(), $page, $perPage, $this->format($request), $this->sessionId($request));
 
-        return $this->paginated($result, ['algorithm' => $result['algorithm']]);
+        return $this->paginated($result, ['algorithm' => $result['algorithm'], 'session_id' => $result['session_id']]);
     }
 
     public function explore(Request $request): Response
     {
         [$page, $perPage] = Validator::pagination($request->query, 20, 100);
-        $result = $this->app->feeds()->explore($request->user(), $page, $perPage, $this->format($request));
+        $result = $this->app->feeds()->explore($request->user(), $page, $perPage, $this->format($request), $this->sessionId($request));
 
-        return $this->paginated($result, ['algorithm' => $result['algorithm']]);
+        return $this->paginated($result, ['algorithm' => $result['algorithm'], 'session_id' => $result['session_id']]);
     }
 
     public function shorts(Request $request): Response
     {
         [$page, $perPage] = Validator::pagination($request->query, 20, 100);
-        $result = $this->app->feeds()->forYou($request->user(), $page, $perPage, 'short');
+        $result = $this->app->feeds()->forYou($request->user(), $page, $perPage, 'short', $this->sessionId($request));
 
-        return $this->paginated($result, ['algorithm' => $result['algorithm']]);
+        return $this->paginated($result, ['algorithm' => $result['algorithm'], 'session_id' => $result['session_id']]);
     }
 
     public function longform(Request $request): Response
     {
         [$page, $perPage] = Validator::pagination($request->query, 20, 100);
-        $result = $this->app->feeds()->forYou($request->user(), $page, $perPage, 'long');
+        $result = $this->app->feeds()->forYou($request->user(), $page, $perPage, 'long', $this->sessionId($request));
 
-        return $this->paginated($result, ['algorithm' => $result['algorithm']]);
+        return $this->paginated($result, ['algorithm' => $result['algorithm'], 'session_id' => $result['session_id']]);
     }
 
     private function format(Request $request): ?string
@@ -53,6 +53,13 @@ final class FeedController extends Controller
         $format = $request->queryParam('format');
 
         return $format === null ? null : (string) $format;
+    }
+
+    private function sessionId(Request $request): ?string
+    {
+        $sessionId = $request->queryParam('session_id');
+
+        return $sessionId === null ? null : (string) $sessionId;
     }
 
     public function trends(Request $request): Response

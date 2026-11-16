@@ -391,13 +391,23 @@ final class AnalysisService
         return $vector;
     }
 
-    public function recordWatch(array $user, string $videoId, int $position, int $duration): array
+    public function recordWatch(array $user, string $videoId, int $position, int $duration, ?string $sessionId = null, ?string $event = null, bool $replayed = false): array
     {
         $video = $this->app->videos()->findAccessible($videoId, $user['id']);
         $duration = $duration > 0 ? $duration : (int) $video['duration'];
         $position = max(0, min($position, max(0, $duration)));
         $ratio = $duration > 0 ? $position / $duration : 0.0;
-        $completed = $ratio >= 0.9;
+        $completionRatio = (float) $this->app->config()->get('feed.completion_ratio', 0.9);
+        $skipRatio = (float) $this->app->config()->get('feed.skip_ratio', 0.25);
+        $event = $event === null ? null : strtolower(trim($event));
+        $event = in_array($event, ['start', 'progress', 'complete', 'skip', 'replay'], true) ? $event : null;
+        $completed = $event === 'complete' || $ratio >= $completionRatio;
+        $skipped = $event === 'skip' || (!$completed && $ratio < $skipRatio && $position <= min(3, max(1, $duration)));
+        $replayed = $replayed || $event === 'replay';
+        $eventType = $replayed ? 'replay' : ($completed ? 'complete' : ($skipped ? 'skip' : ($event ?? 'progress')));
+        $sessionId = $sessionId === null ? null : mb_substr(trim($sessionId), 0, 64, 'UTF-8');
+        $sessionId = $sessionId === '' ? null : $sessionId;
+        $now = Str::now();
         $this->app->db()->insert('watch_events', [
             'id' => Str::id(),
             'video_id' => $videoId,
@@ -405,7 +415,21 @@ final class AnalysisService
             'position_seconds' => $position,
             'duration_seconds' => $duration,
             'completed' => $completed ? 1 : 0,
-            'created_at' => Str::now(),
+            'created_at' => $now,
+        ]);
+        $this->app->db()->insert('watch_signals', [
+            'id' => Str::id(),
+            'video_id' => $videoId,
+            'user_id' => $user['id'],
+            'session_id' => $sessionId,
+            'event_type' => $eventType,
+            'position_seconds' => $position,
+            'duration_seconds' => $duration,
+            'watch_ratio' => round($ratio, 4),
+            'completed' => $completed ? 1 : 0,
+            'skipped' => $skipped ? 1 : 0,
+            'replayed' => $replayed ? 1 : 0,
+            'created_at' => $now,
         ]);
         $this->recordSignal($user['id'], $videoId, 'watch');
 
@@ -413,12 +437,26 @@ final class AnalysisService
             $this->recordSignal($user['id'], $videoId, 'complete');
         }
 
+        if ($skipped) {
+            $this->recordSignal($user['id'], $videoId, 'skip');
+        }
+
+        if ($replayed) {
+            $this->recordSignal($user['id'], $videoId, 'replay');
+        }
+
+        $this->app->recommendations()->recordPlayback($videoId, true, $completed, $skipped, $replayed, $position);
+
         return [
             'video_id' => $videoId,
+            'session_id' => $sessionId,
+            'event' => $eventType,
             'position_seconds' => $position,
             'duration_seconds' => $duration,
             'watch_ratio' => round($ratio, 4),
             'completed' => $completed,
+            'skipped' => $skipped,
+            'replayed' => $replayed,
         ];
     }
 

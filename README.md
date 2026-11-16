@@ -118,6 +118,14 @@ Liste endpoint'leri `page` ve `per_page` kabul eder. `per_page` en fazla 100'dü
 GET /api/v1/feed/foryou?page=2&per_page=15
 ```
 
+Akış sayfaları arasında tekrarı önlemek için istemci aynı oturum kimliğini gönderir:
+
+```http
+GET /api/v1/feed/foryou?page=2&per_page=15&session_id=session-abc
+```
+
+`session_id` verilmezse sunucu üretir ve `meta.session_id` alanında döner. Aynı oturumda daha önce sunulan videolar sonraki sayfalarda tekrar gösterilmez.
+
 ## Endpoint Listesi
 
 Tüm endpoint'ler `/api/v1` altındadır. `Auth` kolonu `Bearer` token gerektirir, `Optional` token varsa kişiselleştirir.
@@ -187,7 +195,7 @@ Tüm endpoint'ler `/api/v1` altındadır. `Auth` kolonu `Bearer` token gerektiri
 | GET | `/videos/{id}/likes` | Optional | Beğenenler |
 | GET | `/videos/{id}/analysis` | Optional | İçerik analizi sonucu |
 | POST | `/videos/{id}/analyze` | Auth | Analizi zorla yeniden çalıştır |
-| POST | `/videos/{id}/watch` | Optional | İzleme ilerlemesi ve tamamlanma |
+| POST | `/videos/{id}/watch` | Optional | İzleme sinyali (start, progress, complete, skip, replay) |
 | POST | `/videos/{id}/not-interested` | Auth | Negatif geri bildirim |
 | DELETE | `/videos/{id}/not-interested` | Auth | Geri bildirimi kaldır |
 
@@ -347,17 +355,34 @@ Analiz `ANALYSIS_ENABLED=false` ile kapatılabilir. `ANALYSIS_FRAME_SAMPLES` ör
 
 ## Öneri Motoru
 
-`/feed/foryou` ve `/explore` adayları şu sinyallerle puanlanır:
+`/feed/foryou`, `/feed/shorts`, `/feed/long` ve `/explore` akışları izleyiciyi ekranda tutmayı hedefleyen çok amaçlı bir sıralama kullanır. Her video için aşağıdaki sinyaller hesaplanır:
 
-- Tazelik ve etkileşim: yarı ömürlü üstel azalma, beğeni/yorum/paylaşım/kaydetme/görüntüleme.
-- İçerik konuları: video konu vektörü ile kalite sinyalleri.
-- İlgi profili: beğeni, kaydetme, paylaşma, yorum, izleme, tamamlama, takip ve açık ilgi alanlarından oluşan kosinüs benzerliği.
-- Yazar yakınlığı: takip edilen içerik üreticilerine ek puan.
-- İzleme geçmişi: daha önce izlenen videolara ceza.
-- Negatif geri bildirim: `not-interested` videolarına güçlü ceza.
-- Çeşitlilik: aynı yazardan üst üste en fazla `feed.max_per_author` video.
+- Tahmini tamamlanma: video, konu ve yazar bazında yumuşatılmış tamamlanma oranlarının ağırlıklı birleşimi.
+- Beklenen izleme süresi: tahmini izleme oranı ile video süresinin çarpımı; uzun videoların toplam izlenme süresi avantajı korunur.
+- Tahmini atlama: video, konu, yazar ve mevcut oturumdaki atlama oranından türetilen atlama olasılığı; yüksek atlama olasılığı güçlü ceza alır.
+- Tekrar izleme: replay sinyalleri ve video/konu bazında yeniden izleme olasılığı.
+- Kanca kalitesi: içerik analizinden gelen hızlı kesme, yüksek hareket, dikey format ve renk sinyalleri.
+- Etkileşim olasılığı: beğeni, yorum, paylaşma, kaydetme ve takip sinyallerinin gösterime göre normalize edilmiş hali.
+- İlgi profili: izleme, tamamlama, beğeni, kaydetme, paylaşma, yorum, takip ve açık ilgi alanlarından oluşan konu vektörüyle kosinüs benzerliği.
+- Yazar yakınlığı: takip edilen üreticilere ek puan.
+- Oturum bağlamı: aynı `session_id` içinde gösterilen konular, yazarlar, tekrarlar ve izleme davranışı.
+- Yorgunluk ve tekrar: aynı konu veya yazardan art arda gelen videolara ve son günlerde tekrar gösterilen videolara ceza.
+- Keşif: az gösterim almış videolar ve yeni üreticiler için UCB benzeri keşif bonusu.
 
-Her akış öğesi `recommendation` alanında `score`, `interest_match`, `matched_topics` ve `reasons` açıklamasını taşır. İlgi skorları `ANALYSIS_INTEREST_HALF_LIFE_DAYS` ile zamanla azalır.
+Sıralama skoru bu sinyallerin ağırlıklı toplamıdır. Ardından slate oluşturucu sıralı listeyi gezer; yazar ve konu çeşitliliğini korur, oturum içi tekrarları engeller ve `feed.exploration_rate` aralığında keşif slotları yerleştirir.
+
+Her akış öğesi `recommendation` alanında şu açıklamayı taşır: `score`, `predicted_completion`, `predicted_skip`, `predicted_engagement`, `expected_watch_seconds`, `interest_match`, `matched_topics`, `exploration`, `fatigue`, `reasons` ve `slate_position`. Akış meta'sında `algorithm.session` oturum istatistiklerini, `algorithm.weights` aktif ağırlıkları ve `algorithm.signals` kullanılan sinyalleri gösterir.
+
+İzleme sinyalleri `/videos/{id}/watch` endpoint'ine gönderilir:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/videos/$VIDEO_ID/watch \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"position":18,"duration":20,"event":"complete","session_id":"session-abc"}'
+```
+
+`event` değerleri `start`, `progress`, `complete`, `skip`, `replay` olur. `replayed=true` tekrar izlemeyi, `event=skip` atlamayı işaretler. Misafir izleyicilerin izleme sinyalleri kullanıcı profiline yazılmaz; oturum gösterimleri yine kaydedilir.
 
 ## Parçalı Video Yükleme
 
@@ -470,7 +495,9 @@ Erişim kuralları:
 
 ## Akış Algoritması
 
-`/feed/foryou` son 14 günün adaylarını çeker ve öneri motoruyla puanlar. Ağırlıklar `config/social.php` içindeki `feed` bölümünden değiştirilir:
+`/feed/foryou` adayları dört havuzdan birleştirilir: son 14 günün yeni videoları, yüksek tamamlanma/izlenme süresine sahip videolar, ilgi profiliyle eşleşen konular ve az gösterim almış keşif videoları. `/explore` aynı motoru 7 günlük pencereyle çalıştırır.
+
+Ağırlıklar `config/social.php` içindeki `feed` bölümünden veya `.env` değişkenlerinden ayarlanır:
 
 ```php
 'feed' => [
@@ -478,15 +505,32 @@ Erişim kuralları:
     'window_days' => 14,
     'half_life_hours' => 72,
     'max_per_author' => 2,
-    'interest_weight' => 4.2,
-    'content_weight' => 2.6,
-    'following_weight' => 2.4,
-    'seen_penalty' => 2.8,
-    'negative_penalty' => 12.0,
+    'max_author_total' => 4,
+    'max_same_topic' => 2,
+    'retention_weight' => 5.4,
+    'expected_watch_weight' => 2.6,
+    'rewatch_weight' => 1.8,
+    'hook_weight' => 3.4,
+    'engagement_weight' => 2.0,
+    'skip_penalty' => 9.0,
+    'session_skip_penalty' => 4.0,
+    'repeat_penalty' => 10.0,
+    'topic_fatigue_weight' => 1.6,
+    'author_fatigue_weight' => 1.2,
+    'exploration_weight' => 1.7,
+    'exploration_rate' => 0.16,
+    'exploration_min_impressions' => 8,
+    'session_window_minutes' => 45,
+    'skip_ratio' => 0.25,
+    'completion_ratio' => 0.9,
 ],
 ```
 
-`following` akışı kronolojiktir ve format filtresi uygular. `explore` son 7 günün etkileşim ve ilgi ağırlıklı sıralamasıdır. `trends` hashtag'lerin son 7 gündeki görüntüleme ve beğeni toplamına göre sıralanır.
+`FEED_RETENTION_WEIGHT`, `FEED_EXPECTED_WATCH_WEIGHT`, `FEED_REWATCH_WEIGHT`, `FEED_HOOK_WEIGHT`, `FEED_ENGAGEMENT_WEIGHT`, `FEED_SKIP_PENALTY`, `FEED_EXPLORATION_WEIGHT`, `FEED_EXPLORATION_RATE`, `FEED_EXPLORATION_MIN_IMPRESSIONS`, `FEED_SESSION_WINDOW_MINUTES`, `FEED_COMPLETION_RATIO`, `FEED_SKIP_RATIO`, `FEED_MAX_PER_AUTHOR`, `FEED_MAX_AUTHOR_TOTAL` ve `FEED_MAX_SAME_TOPIC` ortam değişkenleri aynı değerleri ezer.
+
+`completion_ratio` izleme oranının tamamlanma sayılma eşiğidir; `skip_ratio` bu eşiğin altında kalan ve ilk saniyelerde bırakılan izlemeleri atlama olarak işaretler. `session_window_minutes` oturum bağlamının geriye dönük penceresidir.
+
+`following` akışı kronolojiktir ve format filtresi uygular. `trends` hashtag'lerin son 7 gündeki görüntüleme ve beğeni toplamına göre sıralanır.
 
 ## Veritabanı
 

@@ -60,7 +60,10 @@ final class VideoController extends Controller
             $request->user(),
             $id,
             (int) ($request->input('position') ?? $request->input('position_seconds') ?? 0),
-            (int) ($request->input('duration') ?? $request->input('duration_seconds') ?? 0)
+            (int) ($request->input('duration') ?? $request->input('duration_seconds') ?? 0),
+            $request->input('session_id') === null ? null : (string) $request->input('session_id'),
+            $request->input('event') === null ? null : (string) $request->input('event'),
+            (bool) ($request->input('replayed') ?? false)
         ));
     }
 

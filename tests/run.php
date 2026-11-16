@@ -18,6 +18,8 @@ $config['storage']['root'] = $root . DIRECTORY_SEPARATOR . 'storage';
 $config['mail']['log_path'] = $root . DIRECTORY_SEPARATOR . 'mail.log';
 $config['auth']['expose_tokens'] = true;
 $config['feed']['candidate_limit'] = 100;
+$config['feed']['exploration_rate'] = 0.34;
+$config['feed']['max_author_total'] = 6;
 $config['platform']['short_max_duration'] = 3;
 $config['platform']['long_min_duration'] = 3;
 $config['ads']['frequency_per_hour'] = 5;
@@ -378,6 +380,90 @@ try {
         $hiddenFeed = decoded(api('GET', '/api/v1/feed/foryou', [], $aliceToken, [], ['format' => 'long']), 200, 'hidden feed');
         expect(in_array('not_interested', $hiddenFeed['data'][0]['recommendation']['reasons'], true), 'negative feedback signal missing');
         expect(api('DELETE', '/api/v1/videos/' . $longVideoId . '/not-interested', [], $aliceToken)->status === 204, 'clear feedback failed');
+    });
+
+    step('attention retention ranking', function () use (&$bobToken, &$aliceToken, $root): void {
+        $hook = decoded(api('POST', '/api/v1/videos', [
+            'title' => 'PHP async patterns that hook viewers',
+            'description' => 'Fast backend programming tutorial with practical examples',
+            'visibility' => 'public',
+            'tags' => ['php', 'backend', 'programming', 'tutorial'],
+        ], $bobToken, [
+            'video' => UploadedFile::fromPath($root . '/clip.mp4', 'hook.mp4', 'video/mp4'),
+        ]), 201, 'upload hook video');
+        $skip = decoded(api('POST', '/api/v1/videos', [
+            'title' => 'Quiet garden tour',
+            'description' => 'Slow gardening walkthrough',
+            'visibility' => 'public',
+            'tags' => ['gardening', 'nature'],
+        ], $bobToken, [
+            'video' => UploadedFile::fromPath($root . '/clip.mp4', 'skip.mp4', 'video/mp4'),
+        ]), 201, 'upload skip video');
+        $fresh = decoded(api('POST', '/api/v1/videos', [
+            'title' => 'New php programming trick',
+            'description' => 'Fresh backend tip',
+            'visibility' => 'public',
+            'tags' => ['php', 'backend'],
+        ], $bobToken, [
+            'video' => UploadedFile::fromPath($root . '/clip.mp4', 'fresh.mp4', 'video/mp4'),
+        ]), 201, 'upload fresh video');
+        $session = 'session-attention-1';
+        $completion = decoded(api('POST', '/api/v1/videos/' . $hook['data']['id'] . '/watch', [
+            'position' => 2,
+            'duration' => 2,
+            'event' => 'complete',
+            'session_id' => $session,
+        ], $aliceToken), 200, 'complete hook video');
+        expect($completion['data']['completed'] === true, 'hook watch should complete');
+        expect($completion['data']['event'] === 'complete', 'hook event mismatch');
+        expect($completion['data']['session_id'] === $session, 'watch session missing');
+        $skipped = decoded(api('POST', '/api/v1/videos/' . $skip['data']['id'] . '/watch', [
+            'position' => 0,
+            'duration' => 2,
+            'event' => 'skip',
+            'session_id' => $session,
+        ], $aliceToken), 200, 'skip boring video');
+        expect($skipped['data']['skipped'] === true, 'skip should be detected');
+        expect($skipped['data']['event'] === 'skip', 'skip event mismatch');
+        $replay = decoded(api('POST', '/api/v1/videos/' . $hook['data']['id'] . '/watch', [
+            'position' => 1,
+            'duration' => 2,
+            'event' => 'replay',
+            'replayed' => true,
+            'session_id' => $session,
+        ], $aliceToken), 200, 'replay hook video');
+        expect($replay['data']['replayed'] === true, 'replay should be detected');
+        api('POST', '/api/v1/videos/' . $hook['data']['id'] . '/like', [], $aliceToken);
+
+        $feed = decoded(api('GET', '/api/v1/feed/shorts', [], $aliceToken, [], ['session_id' => $session, 'per_page' => 20]), 200, 'attention feed');
+        expect($feed['meta']['session_id'] === $session, 'feed session mismatch');
+        expect($feed['meta']['algorithm']['session']['id'] === $session, 'algorithm session missing');
+        expect($feed['meta']['algorithm']['session']['skips'] >= 1, 'session skip signal missing');
+        expect(in_array('expected_watch_time', $feed['meta']['algorithm']['signals'], true), 'watch signal missing');
+        expect(in_array('skip_probability', $feed['meta']['algorithm']['signals'], true), 'skip signal missing');
+        $positions = array_flip(array_column($feed['data'], 'id'));
+        expect(isset($positions[$hook['data']['id']]), 'hook video missing from feed');
+        expect(isset($positions[$skip['data']['id']]), 'skip video missing from feed');
+        expect($positions[$hook['data']['id']] < $positions[$skip['data']['id']], 'completed video should outrank skipped video');
+        $hookItem = $feed['data'][$positions[$hook['data']['id']]]['recommendation'];
+        $skipItem = $feed['data'][$positions[$skip['data']['id']]]['recommendation'];
+        expect($hookItem['predicted_completion'] > $skipItem['predicted_completion'], 'completion prediction should favor hook');
+        expect($hookItem['predicted_skip'] < $skipItem['predicted_skip'], 'skip prediction should favor hook');
+        expect($hookItem['expected_watch_seconds'] >= $skipItem['expected_watch_seconds'], 'expected watch time should favor hook');
+        expect($hookItem['matched_topics'] !== [], 'hook topic match missing');
+        $exploratory = array_filter($feed['data'], fn (array $item): bool => ($item['recommendation']['exploration'] ?? 0) > 0.5);
+        expect($exploratory !== [], 'exploration signal missing');
+        $sessionSlots = array_filter($feed['data'], fn (array $item): bool => in_array('exploration_slot', $item['recommendation']['reasons'] ?? [], true));
+        expect($sessionSlots !== [], 'exploration slot missing');
+
+        $pages = 'session-attention-pages';
+        $pageOne = decoded(api('GET', '/api/v1/feed/shorts', [], $aliceToken, [], ['session_id' => $pages, 'per_page' => 2]), 200, 'session page one');
+        $pageTwo = decoded(api('GET', '/api/v1/feed/shorts', [], $aliceToken, [], ['session_id' => $pages, 'per_page' => 2, 'page' => 2]), 200, 'session page two');
+        $overlap = array_intersect(array_column($pageOne['data'], 'id'), array_column($pageTwo['data'], 'id'));
+        expect($overlap === [], 'session pages should not repeat videos');
+        expect($pageTwo['meta']['session_id'] === $pages, 'pagination session mismatch');
+        expect($pageTwo['meta']['algorithm']['session']['impressions'] > 0, 'session impressions missing');
+        expect(isset($positions[$fresh['data']['id']]), 'fresh video should enter candidate pool');
     });
 
     step('notifications lifecycle', function () use (&$bobToken, &$aliceToken): void {

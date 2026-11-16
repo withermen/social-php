@@ -12,7 +12,7 @@ final class FeedService
     {
     }
 
-    public function following(array $user, int $page, int $perPage, ?string $format = null): array
+    public function following(array $user, int $page, int $perPage, ?string $format = null, ?string $sessionId = null): array
     {
         $offset = ($page - 1) * $perPage;
         $format = $this->app->platform()->formatFilter($format);
@@ -32,23 +32,27 @@ final class FeedService
             'SELECT v.*, u.username AS author_username, u.display_name AS author_display_name, u.avatar_path AS author_avatar_path, u.verified AS author_verified FROM videos v JOIN users u ON u.id = v.user_id WHERE ' . $where . ' ORDER BY v.published_at DESC, v.id DESC LIMIT ' . $perPage . ' OFFSET ' . $offset,
             $params
         );
+        $items = $this->app->videos()->payloads($rows, $user['id']);
+        $sessionId = $this->sessionId($sessionId);
+        $this->app->recommendations()->recordImpressions($user, $items, $sessionId, 'following');
 
         return [
-            'items' => $this->app->videos()->payloads($rows, $user['id']),
+            'items' => $items,
             'pagination' => $this->pagination($page, $perPage, $total),
             'algorithm' => 'following',
             'format' => $format,
+            'session_id' => $sessionId,
         ];
     }
 
-    public function forYou(?array $user, int $page, int $perPage, ?string $format = null): array
+    public function forYou(?array $user, int $page, int $perPage, ?string $format = null, ?string $sessionId = null): array
     {
-        return $this->ranked($user, $page, $perPage, true, (int) $this->app->config()->get('feed.window_days', 14), 'foryou', $format);
+        return $this->ranked($user, $page, $perPage, true, (int) $this->app->config()->get('feed.window_days', 14), 'foryou', $format, $sessionId);
     }
 
-    public function explore(?array $user, int $page, int $perPage, ?string $format = null): array
+    public function explore(?array $user, int $page, int $perPage, ?string $format = null, ?string $sessionId = null): array
     {
-        return $this->ranked($user, $page, $perPage, false, 7, 'explore', $format);
+        return $this->ranked($user, $page, $perPage, false, 7, 'explore', $format, $sessionId);
     }
 
     public function trends(int $days, int $limit): array
@@ -127,12 +131,144 @@ final class FeedService
         ];
     }
 
-    private function ranked(?array $user, int $page, int $perPage, bool $affinity, int $windowDays, string $name, ?string $format = null): array
+    private function ranked(?array $user, int $page, int $perPage, bool $affinity, int $windowDays, string $name, ?string $format = null, ?string $sessionId = null): array
     {
-        $candidateLimit = (int) $this->app->config()->get('feed.candidate_limit', 240);
         $format = $this->app->platform()->formatFilter($format);
+        $rows = $this->candidates($user, $windowDays, $format);
+        $sessionId = $this->sessionId($sessionId);
+        $offset = ($page - 1) * $perPage;
+
+        if ($offset > 0) {
+            $served = $this->sessionSeen($sessionId, $name);
+            $rows = array_values(array_filter($rows, fn (array $row): bool => !isset($served[$row['id']])));
+        }
+
+        $scored = $this->app->recommendations()->score($rows, $user, $affinity, $name, $sessionId, $offset + $perPage);
+        $rows = $scored['rows'];
+        $total = count($rows);
+        $sliced = array_slice($rows, $offset, $perPage);
+        $explanations = [];
+
+        foreach ($sliced as &$row) {
+            $explanations[$row['id']] = $row['_explanation'] ?? null;
+            unset($row['_score'], $row['_explanation'], $row['_primary_topic'], $row['_exploratory'], $row['_slate_position']);
+        }
+
+        unset($row);
+        $items = $this->app->videos()->payloads($sliced, $user['id'] ?? null);
+
+        foreach ($items as &$item) {
+            $item['recommendation'] = $explanations[$item['id']] ?? null;
+        }
+
+        unset($item);
+        $this->app->recommendations()->recordImpressions($user, $items, $sessionId, $name);
+
+        return [
+            'items' => $items,
+            'pagination' => $this->pagination($page, $perPage, $total),
+            'algorithm' => array_merge($scored['meta'], [
+                'name' => $name,
+                'window_days' => $windowDays,
+                'half_life_hours' => max(1, (int) $this->app->config()->get('feed.half_life_hours', 72)),
+                'format' => $format,
+                'candidates' => $total,
+            ]),
+            'session_id' => $sessionId,
+        ];
+    }
+
+    private function candidates(?array $user, int $windowDays, string $format): array
+    {
+        $limit = max(20, (int) $this->app->config()->get('feed.candidate_limit', 240));
+        $extra = max(20, (int) floor($limit / 2));
+        $ids = [];
+
+        foreach ($this->recentIds($user, $windowDays, $format, $limit) as $id) {
+            $ids[$id] = true;
+        }
+
+        foreach ($this->performanceIds($user, 90, $format, $extra) as $id) {
+            $ids[$id] = true;
+        }
+
+        foreach ($this->interestIds($user, 60, $format, $extra) as $id) {
+            $ids[$id] = true;
+        }
+
+        foreach ($this->explorationIds($user, 14, $format, $extra) as $id) {
+            $ids[$id] = true;
+        }
+
+        return $this->fetchRows(array_keys($ids));
+    }
+
+    private function recentIds(?array $user, int $windowDays, string $format, int $limit): array
+    {
+        [$where, $params] = $this->visibilityWhere($user, Str::now(-max(1, $windowDays) * 86400), $format);
+        $rows = $this->app->db()->fetchAll(
+            'SELECT v.id FROM videos v JOIN users u ON u.id = v.user_id WHERE ' . $where . ' ORDER BY v.published_at DESC LIMIT ' . $limit,
+            $params
+        );
+
+        return array_column($rows, 'id');
+    }
+
+    private function performanceIds(?array $user, int $days, string $format, int $limit): array
+    {
+        [$where, $params] = $this->visibilityWhere($user, Str::now(-$days * 86400), $format);
+        $rows = $this->app->db()->fetchAll(
+            'SELECT v.id FROM videos v JOIN users u ON u.id = v.user_id JOIN video_performance p ON p.video_id = v.id
+             WHERE ' . $where . ' AND p.starts >= 2
+             ORDER BY (p.completions + 1.0) / (p.starts + 3.0) DESC, p.watch_seconds DESC, p.impressions DESC
+             LIMIT ' . $limit,
+            $params
+        );
+
+        return array_column($rows, 'id');
+    }
+
+    private function interestIds(?array $user, int $days, string $format, int $limit): array
+    {
+        if ($user === null) {
+            return [];
+        }
+
+        $vector = $this->app->analysis()->vector($user['id']);
+        $topics = array_slice(array_keys($vector), 0, 10);
+
+        if ($topics === []) {
+            return [];
+        }
+
+        [$where, $params] = $this->visibilityWhere($user, Str::now(-$days * 86400), $format);
+        $placeholders = implode(', ', array_fill(0, count($topics), '?'));
+        $rows = $this->app->db()->fetchAll(
+            'SELECT v.id FROM videos v JOIN users u ON u.id = v.user_id JOIN video_topics vt ON vt.video_id = v.id
+             WHERE ' . $where . ' AND vt.topic IN (' . $placeholders . ')
+             GROUP BY v.id ORDER BY MAX(vt.weight) DESC, v.published_at DESC LIMIT ' . $limit,
+            array_merge($params, $topics)
+        );
+
+        return array_column($rows, 'id');
+    }
+
+    private function explorationIds(?array $user, int $days, string $format, int $limit): array
+    {
+        [$where, $params] = $this->visibilityWhere($user, Str::now(-$days * 86400), $format);
+        $rows = $this->app->db()->fetchAll(
+            'SELECT v.id FROM videos v JOIN users u ON u.id = v.user_id LEFT JOIN video_performance p ON p.video_id = v.id
+             WHERE ' . $where . ' AND COALESCE(p.impressions, 0) < 5
+             ORDER BY v.published_at DESC LIMIT ' . $limit,
+            $params
+        );
+
+        return array_column($rows, 'id');
+    }
+
+    private function visibilityWhere(?array $user, string $since, string $format): array
+    {
         [$durationClause, $durationParams] = $this->app->platform()->durationClause($format);
-        $since = Str::now(-max(1, $windowDays) * 86400);
         $where = "v.status = 'published' AND v.visibility = 'public' AND u.status = 'active' AND v.published_at >= ? AND " . $durationClause;
         $params = array_merge([$since], $durationParams);
 
@@ -147,44 +283,54 @@ final class FeedService
             $params[] = $user['id'];
         }
 
+        return [$where, $params];
+    }
+
+    private function fetchRows(array $ids): array
+    {
+        if ($ids === []) {
+            return [];
+        }
+
+        $placeholders = implode(', ', array_fill(0, count($ids), '?'));
         $rows = $this->app->db()->fetchAll(
-            'SELECT v.*, u.username AS author_username, u.display_name AS author_display_name, u.avatar_path AS author_avatar_path, u.verified AS author_verified
+            "SELECT v.*, u.username AS author_username, u.display_name AS author_display_name, u.avatar_path AS author_avatar_path, u.verified AS author_verified
              FROM videos v JOIN users u ON u.id = v.user_id
-             WHERE ' . $where . ' ORDER BY v.published_at DESC LIMIT ' . $candidateLimit,
-            $params
+             WHERE v.id IN (" . $placeholders . ") AND v.status = 'published' AND v.visibility = 'public' AND u.status = 'active'",
+            $ids
         );
-        $scored = $this->app->recommendations()->score($rows, $user, $affinity, $name);
-        $rows = $scored['rows'];
-        $total = count($rows);
-        $offset = ($page - 1) * $perPage;
-        $sliced = array_slice($rows, $offset, $perPage);
-        $explanations = [];
+        $byId = [];
 
-        foreach ($sliced as &$row) {
-            $explanations[$row['id']] = $row['_explanation'] ?? null;
-            unset($row['_score'], $row['_explanation']);
+        foreach ($rows as $row) {
+            $byId[$row['id']] = $row;
         }
 
-        unset($row);
-        $items = $this->app->videos()->payloads($sliced, $user['id'] ?? null);
+        $ordered = [];
 
-        foreach ($items as &$item) {
-            $item['recommendation'] = $explanations[$item['id']] ?? null;
+        foreach ($ids as $id) {
+            if (isset($byId[$id])) {
+                $ordered[] = $byId[$id];
+            }
         }
 
-        unset($item);
+        return $ordered;
+    }
 
-        return [
-            'items' => $items,
-            'pagination' => $this->pagination($page, $perPage, $total),
-            'algorithm' => array_merge($scored['meta'], [
-                'name' => $name,
-                'window_days' => $windowDays,
-                'half_life_hours' => max(1, (int) $this->app->config()->get('feed.half_life_hours', 72)),
-                'format' => $format,
-                'candidates' => $total,
-            ]),
-        ];
+    private function sessionSeen(string $sessionId, string $source): array
+    {
+        $rows = $this->app->db()->fetchAll(
+            'SELECT DISTINCT video_id FROM feed_impressions WHERE session_id = ? AND source = ?',
+            [$sessionId, $source]
+        );
+
+        return array_fill_keys(array_column($rows, 'video_id'), true);
+    }
+
+    private function sessionId(?string $sessionId): string
+    {
+        $sessionId = $sessionId === null ? '' : mb_substr(trim($sessionId), 0, 64, 'UTF-8');
+
+        return $sessionId === '' ? Str::id() : $sessionId;
     }
 
     private function pagination(int $page, int $perPage, int $total): array
