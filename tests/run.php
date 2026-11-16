@@ -97,7 +97,7 @@ try {
 
     step('api index', function (): void {
         $data = decoded(api('GET', '/'), 200, 'index');
-        expect($data['data']['version'] === '1.0.0', 'version missing');
+        expect($data['data']['version'] === '1.1.0', 'version missing');
     });
 
     step('platform modes and capabilities', function (): void {
