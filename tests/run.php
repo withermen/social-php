@@ -18,6 +18,12 @@ $config['storage']['root'] = $root . DIRECTORY_SEPARATOR . 'storage';
 $config['mail']['log_path'] = $root . DIRECTORY_SEPARATOR . 'mail.log';
 $config['auth']['expose_tokens'] = true;
 $config['feed']['candidate_limit'] = 100;
+$config['platform']['short_max_duration'] = 3;
+$config['platform']['long_min_duration'] = 3;
+$config['ads']['frequency_per_hour'] = 5;
+$config['ads']['min_budget_cents'] = 10;
+$config['payments']['webhook_secret'] = 'test-payment-secret';
+$config['licensing']['webhook_secret'] = 'test-license-secret';
 $app = new App($config);
 $tests = 0;
 
@@ -28,9 +34,8 @@ function expect(bool $condition, string $message): void
     }
 }
 
-function api(string $method, string $path, array $body = [], ?string $token = null, array $files = [], array $query = [], ?string $rawBody = null, array $headers = []): Response
+function apiOn(App $target, string $method, string $path, array $body = [], ?string $token = null, array $files = [], array $query = [], ?string $rawBody = null, array $headers = []): Response
 {
-    global $app;
     $multipart = $files !== [];
     $contentType = $multipart ? 'multipart/form-data; boundary=test' : ($rawBody === null ? 'application/json' : 'application/octet-stream');
     $payload = $multipart ? '' : ($rawBody ?? json_encode($body));
@@ -40,7 +45,14 @@ function api(string $method, string $path, array $body = [], ?string $token = nu
         $requestHeaders['authorization'] = 'Bearer ' . $token;
     }
 
-    return $app->handle(new Request($method, $path, $query, $requestHeaders, $payload, $files, ['REMOTE_ADDR' => '127.0.0.1'], $multipart ? $body : []));
+    return $target->handle(new Request($method, $path, $query, $requestHeaders, $payload, $files, ['REMOTE_ADDR' => '127.0.0.1'], $multipart ? $body : []));
+}
+
+function api(string $method, string $path, array $body = [], ?string $token = null, array $files = [], array $query = [], ?string $rawBody = null, array $headers = []): Response
+{
+    global $app;
+
+    return apiOn($app, $method, $path, $body, $token, $files, $query, $rawBody, $headers);
 }
 
 function decoded(Response $response, int $status, string $label): array
@@ -66,9 +78,9 @@ function step(string $name, callable $callback): void
     echo '[ok] ' . $name . PHP_EOL;
 }
 
-function videoFixture(string $path): void
+function videoFixture(string $path, int $seconds = 2): void
 {
-    $command = 'ffmpeg -y -f lavfi -i ' . escapeshellarg('testsrc=size=320x180:rate=24') . ' -t 2 -c:v libx264 -pix_fmt yuv420p ' . escapeshellarg($path) . ' 2>&1';
+    $command = 'ffmpeg -y -f lavfi -i ' . escapeshellarg('testsrc=size=320x180:rate=24') . ' -t ' . $seconds . ' -c:v libx264 -pix_fmt yuv420p ' . escapeshellarg($path) . ' 2>&1';
     exec($command, $output, $code);
 
     if ($code !== 0 || !is_file($path) || filesize($path) < 1000) {
@@ -86,6 +98,14 @@ try {
     step('api index', function (): void {
         $data = decoded(api('GET', '/'), 200, 'index');
         expect($data['data']['version'] === '1.0.0', 'version missing');
+    });
+
+    step('platform modes and capabilities', function (): void {
+        $data = decoded(api('GET', '/api/v1/platform'), 200, 'platform');
+        expect($data['data']['mode'] === 'hybrid', 'platform mode should be hybrid');
+        expect(in_array('short', $data['data']['accepts'], true) && in_array('long', $data['data']['accepts'], true), 'hybrid should accept both formats');
+        expect($data['data']['features']['content_analysis'] === true, 'content analysis should be enabled');
+        expect($data['data']['short_max_duration'] === 3, 'short duration limit mismatch');
     });
 
     $aliceToken = '';
@@ -182,6 +202,11 @@ try {
 
     $videoId = '';
     $secondVideoId = '';
+    $longVideoId = '';
+    $adCampaignId = '';
+    $adCreativeId = '';
+    $licenseKey = '';
+    $licenseId = '';
     $commentId = '';
     $replyId = '';
     $conversationId = '';
@@ -209,6 +234,20 @@ try {
         expect(in_array('backend', $video['data']['tags'], true), 'tag backend missing');
         expect($video['data']['thumbnail_url'] !== null, 'thumbnail missing');
         $videoId = $video['data']['id'];
+    });
+
+    step('video content analysis', function () use (&$bobToken, &$aliceToken, &$videoId): void {
+        $analysis = decoded(api('GET', '/api/v1/videos/' . $videoId . '/analysis'), 200, 'analysis');
+        expect($analysis['data']['status'] === 'complete', 'analysis should be complete');
+        expect($analysis['data']['format'] === 'short', 'analysis format should be short');
+        expect(in_array('short_form', array_keys($analysis['data']['topics']), true), 'short_form topic missing');
+        expect(in_array('backend', array_keys($analysis['data']['topics']), true), 'text topic missing');
+        expect($analysis['data']['features']['frame_count'] >= 1, 'analysis should sample frames');
+        expect(is_array($analysis['data']['visual']['palette']), 'palette missing');
+        expect($analysis['data']['visual']['perceptual_hash'] !== null, 'perceptual hash missing');
+        $replay = decoded(api('POST', '/api/v1/videos/' . $videoId . '/analyze', [], $bobToken), 200, 'force analysis');
+        expect($replay['data']['status'] === 'complete', 'forced analysis failed');
+        expect(api('POST', '/api/v1/videos/' . $videoId . '/analyze', [], $aliceToken)->status === 403, 'non owner should not analyze');
     });
 
     step('stream with range', function () use (&$videoId): void {
@@ -287,6 +326,58 @@ try {
 
         $searchTags = decoded(api('GET', '/api/v1/search', [], null, [], ['q' => 'dem', 'type' => 'hashtags']), 200, 'search hashtags');
         expect($searchTags['data']['hashtags'][0]['tag'] === 'demo', 'hashtag search mismatch');
+    });
+
+    step('content based recommendations and formats', function () use (&$bobToken, &$aliceToken, &$videoId, &$longVideoId, $root): void {
+        videoFixture($root . '/long.mp4', 4);
+        $long = decoded(api('POST', '/api/v1/videos', [
+            'title' => 'Long form php tutorial',
+            'description' => 'Deep dive into backend engineering',
+            'visibility' => 'public',
+            'tags' => ['php', 'tutorial'],
+        ], $bobToken, [
+            'video' => UploadedFile::fromPath($root . '/long.mp4', 'long.mp4', 'video/mp4'),
+        ]), 201, 'upload long video');
+        expect($long['data']['format'] === 'long', 'long video format mismatch');
+        expect(in_array('long_form', $long['data']['topics'], true), 'long form topic missing');
+        $longVideoId = $long['data']['id'];
+
+        $interests = decoded(api('PUT', '/api/v1/recommendations/interests', [
+            'topics' => ['php', 'backend', 'tutorial', 'programming'],
+        ], $aliceToken), 200, 'set interests');
+        expect(in_array('php', array_column($interests['data'], 'topic'), true), 'explicit interest missing');
+
+        $profile = decoded(api('GET', '/api/v1/recommendations/interests', [], $aliceToken), 200, 'interest profile');
+        expect($profile['meta']['personalized'] === true, 'interest profile should be personalized');
+        expect(in_array('php', $profile['meta']['topics'], true), 'interest topic missing');
+
+        $shorts = decoded(api('GET', '/api/v1/feed/shorts', [], $aliceToken), 200, 'shorts feed');
+        expect($shorts['meta']['algorithm']['format'] === 'short', 'shorts feed format mismatch');
+        expect(in_array($videoId, array_column($shorts['data'], 'id'), true), 'short video missing from shorts feed');
+        expect(!in_array($longVideoId, array_column($shorts['data'], 'id'), true), 'long video should not appear in shorts feed');
+
+        $longFeed = decoded(api('GET', '/api/v1/feed/foryou', [], $aliceToken, [], ['format' => 'long']), 200, 'long feed');
+        expect($longFeed['data'][0]['id'] === $longVideoId, 'long feed should contain long video');
+        expect($longFeed['data'][0]['recommendation']['interest_match'] > 0, 'interest match should be positive');
+
+        $forYou = decoded(api('GET', '/api/v1/feed/foryou', [], $aliceToken, [], ['format' => 'short']), 200, 'personalized feed');
+        expect($forYou['meta']['algorithm']['personalized'] === true, 'feed should be personalized');
+        expect($forYou['meta']['algorithm']['interests'] > 0, 'feed should use interests');
+        expect($forYou['data'][0]['recommendation']['matched_topics'] !== [], 'matched topics missing');
+        expect($forYou['data'][0]['recommendation']['score'] > 0, 'recommendation score missing');
+
+        $watch = decoded(api('POST', '/api/v1/videos/' . $videoId . '/watch', [
+            'position' => 2,
+            'duration' => 2,
+        ], $aliceToken), 200, 'watch event');
+        expect($watch['data']['completed'] === true, 'watch should be completed');
+        expect(abs((float) $watch['data']['watch_ratio'] - 1.0) < 0.001, 'watch ratio mismatch');
+
+        $hidden = decoded(api('POST', '/api/v1/videos/' . $longVideoId . '/not-interested', [], $aliceToken), 200, 'not interested');
+        expect($hidden['data']['hidden'] === true, 'feedback should hide video');
+        $hiddenFeed = decoded(api('GET', '/api/v1/feed/foryou', [], $aliceToken, [], ['format' => 'long']), 200, 'hidden feed');
+        expect(in_array('not_interested', $hiddenFeed['data'][0]['recommendation']['reasons'], true), 'negative feedback signal missing');
+        expect(api('DELETE', '/api/v1/videos/' . $longVideoId . '/not-interested', [], $aliceToken)->status === 204, 'clear feedback failed');
     });
 
     step('notifications lifecycle', function () use (&$bobToken, &$aliceToken): void {
@@ -415,6 +506,227 @@ try {
 
         $users = decoded(api('GET', '/api/v1/admin/users', [], $adminToken, [], ['q' => 'troll']), 200, 'admin user search');
         expect($users['data'][0]['username'] === 'troll', 'admin user search mismatch');
+    });
+
+    step('commercial license lifecycle', function () use (&$adminToken, &$licenseKey, &$licenseId): void {
+        $plans = decoded(api('GET', '/api/v1/license/plans'), 200, 'license plans');
+        expect(count($plans['data']) === 2, 'license plans missing');
+        expect($plans['data'][0]['price_cents'] > 0, 'license price missing');
+        expect($plans['meta']['enforcement'] === 'off', 'license enforcement should be off in tests');
+
+        $issued = decoded(api('POST', '/api/v1/admin/licenses', [
+            'plan' => 'commercial',
+            'email' => 'buyer@example.com',
+            'holder_name' => 'Buyer Inc',
+        ], $adminToken), 201, 'issue license');
+        $licenseKey = $issued['data']['key'];
+        $licenseId = $issued['data']['license']['id'];
+        expect(str_starts_with($licenseKey, 'SOC-COMM-'), 'license key format mismatch');
+        expect($issued['data']['license']['status'] === 'active', 'license should be active');
+
+        for ($i = 1; $i <= 3; $i++) {
+            $activation = decoded(api('POST', '/api/v1/license/activate', [
+                'license_key' => $licenseKey,
+                'installation_id' => 'install-' . $i,
+                'domain' => 'site-' . $i . '.example.com',
+            ]), 200, 'activate license ' . $i);
+            expect($activation['data']['activated'] === true, 'activation failed');
+        }
+
+        expect(api('POST', '/api/v1/license/activate', [
+            'license_key' => $licenseKey,
+            'installation_id' => 'install-4',
+        ])->status === 403, 'activation limit should be enforced');
+
+        $status = decoded(api('GET', '/api/v1/license/status', [], $adminToken), 200, 'license status');
+        expect($status['data']['required'] === false, 'license should not be required in tests');
+
+        $revoked = decoded(api('POST', '/api/v1/admin/licenses/' . $licenseId . '/revoke', [], $adminToken), 200, 'revoke license');
+        expect($revoked['data']['status'] === 'revoked', 'license should be revoked');
+        expect(api('POST', '/api/v1/license/activate', [
+            'license_key' => $licenseKey,
+            'installation_id' => 'install-5',
+        ])->status === 403, 'revoked license should not activate');
+
+        $licenses = decoded(api('GET', '/api/v1/admin/licenses', [], $adminToken), 200, 'license list');
+        expect(count($licenses['data']) >= 1, 'license list empty');
+
+        $checkout = decoded(api('POST', '/api/v1/license/checkout', [
+            'plan' => 'enterprise',
+            'email' => 'company@example.com',
+            'holder_name' => 'Company LLC',
+        ]), 201, 'license checkout');
+        expect($checkout['data']['status'] === 'pending', 'license order should be pending');
+        expect($checkout['data']['amount_cents'] > 0, 'license order amount missing');
+
+        $webhookBody = json_encode([
+            'id' => 'evt_license_' . $checkout['data']['order_id'],
+            'type' => 'license.paid',
+            'data' => ['order_id' => $checkout['data']['order_id']],
+        ]);
+        $signature = 'sha256=' . hash_hmac('sha256', $webhookBody, 'test-license-secret');
+        $paid = decoded(api('POST', '/api/v1/license/webhook', [], null, [], [], $webhookBody, [
+            'x-license-signature' => $signature,
+        ]), 200, 'license webhook');
+        expect($paid['data']['processed'] === true, 'license webhook not processed');
+        expect($paid['data']['license']['plan'] === 'enterprise', 'license webhook plan mismatch');
+        expect(!empty($paid['data']['key']), 'license webhook key missing');
+        $licenseKey = $paid['data']['key'];
+
+        $duplicate = decoded(api('POST', '/api/v1/license/webhook', [], null, [], [], $webhookBody, [
+            'x-license-signature' => $signature,
+        ]), 200, 'duplicate license webhook');
+        expect($duplicate['data']['duplicate'] === true, 'duplicate webhook should be idempotent');
+    });
+
+    step('license enforcement middleware', function () use (&$licenseKey): void {
+        global $config;
+        $restricted = $config;
+        $restricted['licensing']['enabled'] = true;
+        $restricted['licensing']['enforcement'] = 'enforce';
+        $restricted['licensing']['key'] = '';
+        $restrictedApp = new App($restricted);
+        $blocked = decoded(apiOn($restrictedApp, 'GET', '/api/v1/platform'), 402, 'unlicensed platform');
+        expect($blocked['error']['code'] === 'license_required', 'license error code mismatch');
+
+        $licensed = $config;
+        $licensed['licensing']['enabled'] = true;
+        $licensed['licensing']['enforcement'] = 'enforce';
+        $licensed['licensing']['key'] = $licenseKey;
+        $licensedApp = new App($licensed);
+        $allowed = apiOn($licensedApp, 'GET', '/api/v1/platform');
+        expect($allowed->status === 200, 'licensed platform should respond');
+        expect($allowed->getHeader('X-License-Status') === 'licensed', 'license status header mismatch');
+    });
+
+    step('advertising lifecycle and targeting', function () use (&$aliceToken, &$bobToken, &$adCampaignId, &$adCreativeId): void {
+        $campaign = decoded(api('POST', '/api/v1/ads/campaigns', [
+            'name' => 'PHP course promo',
+            'placement' => 'feed',
+            'objective' => 'impressions',
+            'budget_cents' => 1000,
+            'bid_cents' => 1000,
+            'targeting' => ['topics' => ['php'], 'formats' => ['short']],
+        ], $aliceToken), 201, 'create ad campaign');
+        expect($campaign['data']['status'] === 'active', 'campaign should be active');
+        $adCampaignId = $campaign['data']['id'];
+
+        $creative = decoded(api('POST', '/api/v1/ads/campaigns/' . $adCampaignId . '/creatives', [
+            'title' => 'Learn PHP today',
+            'body' => 'Backend engineering course',
+            'cta_label' => 'Start learning',
+            'click_url' => 'https://example.com/php-course',
+            'image_url' => 'https://example.com/ad.jpg',
+        ], $aliceToken), 201, 'create ad creative');
+        $adCreativeId = $creative['data']['id'];
+        expect($creative['data']['sponsored'] ?? true, 'creative payload invalid');
+
+        $served = decoded(api('GET', '/api/v1/ads/serve', [], $aliceToken, [], ['placement' => 'feed']), 200, 'serve ad');
+        expect($served['data']['id'] === $adCreativeId, 'served creative mismatch');
+        expect($served['data']['sponsored'] === true, 'ad should be sponsored');
+        expect($served['meta']['reason'] === null, 'ad should fill');
+        expect(isset($served['data']['impression_id']), 'impression id missing');
+
+        for ($i = 0; $i < 4; $i++) {
+            api('GET', '/api/v1/ads/serve', [], $aliceToken, [], ['placement' => 'feed']);
+        }
+
+        $capped = decoded(api('GET', '/api/v1/ads/serve', [], $aliceToken, [], ['placement' => 'feed']), 200, 'frequency capped ad');
+        expect($capped['data'] === null, 'frequency cap should block ad');
+        expect($capped['meta']['reason'] === 'frequency_cap', 'frequency cap reason missing');
+
+        $guest = decoded(api('GET', '/api/v1/ads/serve', [], null, [], ['placement' => 'feed']), 200, 'guest ad');
+        expect($guest['data'] === null, 'targeted ad should not serve without context');
+
+        $click = decoded(api('POST', '/api/v1/ads/' . $adCreativeId . '/click', [], $aliceToken), 200, 'ad click');
+        expect($click['data']['clicked'] === true, 'ad click failed');
+        expect($click['data']['click_url'] === 'https://example.com/php-course', 'click url mismatch');
+
+        $stats = decoded(api('GET', '/api/v1/ads/campaigns/' . $adCampaignId . '/stats', [], $aliceToken), 200, 'ad stats');
+        expect($stats['data']['impressions'] === 5, 'impression count mismatch');
+        expect($stats['data']['clicks'] === 1, 'click count mismatch');
+        expect($stats['data']['ctr'] > 0, 'ctr should be positive');
+        expect($stats['data']['spent_cents'] > 0, 'ad spend missing');
+
+        $clickCampaign = decoded(api('POST', '/api/v1/ads/campaigns', [
+            'name' => 'Click budget campaign',
+            'placement' => 'explore',
+            'objective' => 'clicks',
+            'budget_cents' => 100,
+            'bid_cents' => 50,
+        ], $aliceToken), 201, 'create click campaign');
+        $clickCreative = decoded(api('POST', '/api/v1/ads/campaigns/' . $clickCampaign['data']['id'] . '/creatives', [
+            'title' => 'Click me',
+            'click_url' => 'https://example.com/click',
+        ], $aliceToken), 201, 'create click creative');
+        api('POST', '/api/v1/ads/' . $clickCreative['data']['id'] . '/click', [], $aliceToken);
+        api('POST', '/api/v1/ads/' . $clickCreative['data']['id'] . '/click', [], $aliceToken);
+        $clickStats = decoded(api('GET', '/api/v1/ads/campaigns/' . $clickCampaign['data']['id'] . '/stats', [], $aliceToken), 200, 'click stats');
+        expect($clickStats['data']['spent_cents'] === 100, 'click spend mismatch');
+        expect($clickStats['data']['status'] === 'completed', 'budget exhausted campaign should complete');
+
+        $adminCampaigns = decoded(api('GET', '/api/v1/ads/campaigns', [], $aliceToken), 200, 'campaign list');
+        expect(count($adminCampaigns['data']) === 2, 'campaign list mismatch');
+
+        api('POST', '/api/v1/premium/subscribe', ['plan' => 'plus'], $bobToken);
+        $adFree = decoded(api('GET', '/api/v1/ads/serve', [], $bobToken, [], ['placement' => 'feed']), 200, 'premium ad free');
+        expect($adFree['data'] === null, 'premium user should not receive ads');
+        expect($adFree['meta']['reason'] === 'premium_ad_free', 'premium ad free reason missing');
+        api('POST', '/api/v1/premium/cancel', [], $bobToken);
+    });
+
+    step('premium subscription lifecycle', function () use (&$aliceToken, &$aliceId, &$adminToken): void {
+        $plans = decoded(api('GET', '/api/v1/premium/plans'), 200, 'premium plans');
+        expect(count($plans['data']) === 2, 'premium plans missing');
+        expect($plans['data'][0]['price_cents'] > 0, 'premium price missing');
+
+        $before = decoded(api('GET', '/api/v1/me/subscription', [], $aliceToken), 200, 'subscription before');
+        expect($before['data']['premium']['is_premium'] === false, 'alice should not be premium');
+
+        $subscribed = decoded(api('POST', '/api/v1/premium/subscribe', ['plan' => 'plus'], $aliceToken), 201, 'subscribe plus');
+        expect($subscribed['data']['premium']['is_premium'] === true, 'subscription should activate');
+        expect($subscribed['data']['premium']['entitlements']['ad_free'] === true, 'ad_free entitlement missing');
+        expect($subscribed['data']['premium']['entitlements']['max_duration'] === 1800, 'premium duration limit mismatch');
+        expect($subscribed['data']['subscription']['plan_code'] === 'plus', 'subscription plan mismatch');
+
+        $status = decoded(api('GET', '/api/v1/premium/status', [], $aliceToken), 200, 'premium status');
+        expect($status['data']['is_premium'] === true, 'premium status mismatch');
+
+        $canceled = decoded(api('POST', '/api/v1/premium/cancel', [], $aliceToken), 200, 'cancel premium');
+        expect($canceled['data']['premium']['is_premium'] === false, 'premium should be canceled');
+        expect($canceled['data']['subscription']['cancel_at_period_end'] === true, 'cancel flag missing');
+
+        $webhookBody = json_encode([
+            'id' => 'evt_sub_1',
+            'type' => 'subscription.activated',
+            'data' => [
+                'user_id' => $aliceId,
+                'plan_code' => 'pro',
+                'provider_ref' => 'sub_test_1',
+            ],
+        ]);
+        $signature = 'sha256=' . hash_hmac('sha256', $webhookBody, 'test-payment-secret');
+        $activated = decoded(api('POST', '/api/v1/premium/webhook', [], null, [], [], $webhookBody, [
+            'x-payment-signature' => $signature,
+        ]), 200, 'premium webhook');
+        expect($activated['data']['processed'] === true, 'premium webhook not processed');
+        expect($activated['data']['premium']['plan'] === 'pro', 'premium webhook plan mismatch');
+        expect(api('POST', '/api/v1/premium/webhook', [], null, [], [], $webhookBody, [
+            'x-payment-signature' => 'sha256=bad',
+        ])->status === 403, 'invalid webhook signature should fail');
+
+        $granted = decoded(api('POST', '/api/v1/admin/subscriptions', [
+            'user_id' => $aliceId,
+            'plan' => 'plus',
+            'days' => 30,
+        ], $adminToken), 201, 'admin grant');
+        expect($granted['data']['premium']['plan'] === 'plus', 'admin grant plan mismatch');
+
+        $stats = decoded(api('GET', '/api/v1/admin/stats', [], $adminToken), 200, 'admin stats extended');
+        expect(isset($stats['data']['ads']['impressions']), 'ad stats missing');
+        expect(isset($stats['data']['premium']['active_subscriptions']), 'premium stats missing');
+        expect(isset($stats['data']['licensing']['total']), 'license stats missing');
+        expect($stats['data']['analysis']['analyzed'] >= 2, 'analysis stats missing');
     });
 
     step('password reset flow', function () use (&$aliceId, &$aliceToken): void {

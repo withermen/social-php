@@ -156,6 +156,7 @@ final class UserService
                 $this->app->db()->run('UPDATE users SET following_count = following_count + 1 WHERE id = ?', [$user['id']]);
                 $this->app->db()->run('UPDATE users SET follower_count = follower_count + 1 WHERE id = ?', [$target['id']]);
             });
+            $this->app->analysis()->recordAuthorSignal($user['id'], $target['id'], 1.5);
             $this->app->notifications()->create($target['id'], $user['id'], 'follow', 'user', $user['id']);
         }
 
@@ -301,6 +302,7 @@ final class UserService
             'follower_count' => (int) $user['follower_count'],
             'following_count' => (int) $user['following_count'],
             'video_count' => (int) $user['video_count'],
+            'premium' => $this->app->premium()->summary($user['id']),
             'created_at' => $user['created_at'],
             'is_me' => $viewerId === $user['id'],
             'is_following' => (bool) ($flags['is_following'] ?? false),

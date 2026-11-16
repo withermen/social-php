@@ -41,6 +41,160 @@ final class MediaProcessor
         ];
     }
 
+    public function metadata(string $path): array
+    {
+        [$success, $output] = $this->run([
+            (string) ($this->config['ffprobe'] ?? 'ffprobe'),
+            '-v', 'error',
+            '-show_streams',
+            '-show_format',
+            '-of', 'json',
+            $path,
+        ]);
+
+        if (!$success) {
+            return [];
+        }
+
+        $data = json_decode($output, true);
+
+        if (!is_array($data)) {
+            return [];
+        }
+
+        $video = null;
+        $audio = null;
+
+        foreach ($data['streams'] ?? [] as $stream) {
+            if (($stream['codec_type'] ?? null) === 'video' && $video === null) {
+                $video = $stream;
+            }
+
+            if (($stream['codec_type'] ?? null) === 'audio' && $audio === null) {
+                $audio = $stream;
+            }
+        }
+
+        $format = $data['format'] ?? [];
+        $frameRate = 0.0;
+
+        if (isset($video['avg_frame_rate']) && preg_match('/^(\d+)\/(\d+)$/', (string) $video['avg_frame_rate'], $matches)) {
+            $divisor = (int) $matches[2];
+            $frameRate = $divisor > 0 ? (int) $matches[1] / $divisor : 0.0;
+        }
+
+        return [
+            'duration' => (float) ($video['duration'] ?? $format['duration'] ?? 0),
+            'width' => (int) ($video['width'] ?? 0),
+            'height' => (int) ($video['height'] ?? 0),
+            'fps' => $frameRate,
+            'bitrate' => (int) ($format['bit_rate'] ?? $video['bit_rate'] ?? 0),
+            'video_codec' => $video['codec_name'] ?? null,
+            'audio_codec' => $audio['codec_name'] ?? null,
+            'has_audio' => $audio !== null,
+            'channels' => (int) ($audio['channels'] ?? 0),
+            'sample_rate' => (int) ($audio['sample_rate'] ?? 0),
+            'tags' => (array) ($format['tags'] ?? []),
+        ];
+    }
+
+    public function sceneCuts(string $path, float $threshold = 0.32, int $limitSeconds = 900): array
+    {
+        $filter = "select='gt(scene," . max(0.05, min(0.95, $threshold)) . ")',showinfo";
+        [$success, $output] = $this->run([
+            (string) ($this->config['ffmpeg'] ?? 'ffmpeg'),
+            '-i', $path,
+            '-t', (string) max(1, $limitSeconds),
+            '-an',
+            '-filter:v', $filter,
+            '-f', 'null',
+            '-',
+        ]);
+
+        if (!$success) {
+            return [];
+        }
+
+        preg_match_all('/pts_time:([0-9]+(?:\.[0-9]+)?)/', $output, $matches);
+
+        return array_values(array_filter(array_map('floatval', $matches[1] ?? []), fn (float $time): bool => $time > 0));
+    }
+
+    public function audioStats(string $path, int $duration = 0): ?array
+    {
+        [$success, $output] = $this->run([
+            (string) ($this->config['ffmpeg'] ?? 'ffmpeg'),
+            '-i', $path,
+            '-vn',
+            '-af', 'volumedetect,silencedetect=noise=-35dB:d=0.4',
+            '-f', 'null',
+            '-',
+        ]);
+
+        if (!$success) {
+            return null;
+        }
+
+        $loudness = null;
+        $peak = null;
+
+        if (preg_match('/mean_volume:\s*(-?[0-9.]+)\s*dB/', $output, $match)) {
+            $loudness = (float) $match[1];
+        }
+
+        if (preg_match('/max_volume:\s*(-?[0-9.]+)\s*dB/', $output, $match)) {
+            $peak = (float) $match[1];
+        }
+
+        $silenceSeconds = 0.0;
+
+        if (preg_match_all('/silence_duration:\s*([0-9.]+)/', $output, $matches)) {
+            foreach ($matches[1] as $value) {
+                $silenceSeconds += (float) $value;
+            }
+        }
+
+        return [
+            'loudness' => $loudness,
+            'peak' => $peak,
+            'silence_seconds' => $silenceSeconds,
+            'silence_ratio' => $duration > 0 ? min(1.0, $silenceSeconds / $duration) : 0.0,
+        ];
+    }
+
+    public function frames(string $videoPath, string $directory, int $duration, int $count): array
+    {
+        if (!is_dir($directory)) {
+            mkdir($directory, 0775, true);
+        }
+
+        $count = max(1, min(12, $count));
+        $width = (int) ($this->config['frame_width'] ?? 160);
+        $width = max(64, min(640, $width));
+        $frames = [];
+
+        for ($index = 0; $index < $count; $index++) {
+            $position = $duration > 1 ? $duration * (($index + 0.5) / $count) : 0.0;
+            $output = $directory . DIRECTORY_SEPARATOR . 'frame-' . $index . '.jpg';
+            [$success] = $this->run([
+                (string) ($this->config['ffmpeg'] ?? 'ffmpeg'),
+                '-y',
+                '-ss', (string) round($position, 3),
+                '-i', $videoPath,
+                '-frames:v', '1',
+                '-vf', 'scale=' . $width . ':-1',
+                '-q:v', '4',
+                $output,
+            ]);
+
+            if ($success && is_file($output) && filesize($output) > 0) {
+                $frames[] = $output;
+            }
+        }
+
+        return $frames;
+    }
+
     public function thumbnail(string $videoPath, string $outputPath, int $duration = 0): bool
     {
         $directory = dirname($outputPath);
@@ -58,7 +212,7 @@ final class MediaProcessor
             '-ss', (string) $seek,
             '-i', $videoPath,
             '-frames:v', '1',
-            '-vf', 'scale=' . $width . ':-2',
+            '-vf', 'scale=' . $width . ':-1',
             '-q:v', '3',
             $temporary,
         ]);

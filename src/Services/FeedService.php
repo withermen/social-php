@@ -12,15 +12,18 @@ final class FeedService
     {
     }
 
-    public function following(array $user, int $page, int $perPage): array
+    public function following(array $user, int $page, int $perPage, ?string $format = null): array
     {
         $offset = ($page - 1) * $perPage;
+        $format = $this->app->platform()->formatFilter($format);
+        [$durationClause, $durationParams] = $this->app->platform()->durationClause($format);
         $where = "v.status = 'published' AND v.visibility = 'public' AND u.status = 'active'"
             . ' AND (v.user_id = ? OR v.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?))'
             . ' AND v.user_id NOT IN (SELECT blocked_id FROM blocks WHERE blocker_id = ?)'
             . ' AND v.user_id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)'
-            . ' AND v.user_id NOT IN (SELECT muted_id FROM mutes WHERE muter_id = ?)';
-        $params = [$user['id'], $user['id'], $user['id'], $user['id'], $user['id']];
+            . ' AND v.user_id NOT IN (SELECT muted_id FROM mutes WHERE muter_id = ?)'
+            . ' AND ' . $durationClause;
+        $params = array_merge([$user['id'], $user['id'], $user['id'], $user['id'], $user['id']], $durationParams);
         $total = (int) $this->app->db()->value(
             'SELECT COUNT(*) FROM videos v JOIN users u ON u.id = v.user_id WHERE ' . $where,
             $params
@@ -34,17 +37,18 @@ final class FeedService
             'items' => $this->app->videos()->payloads($rows, $user['id']),
             'pagination' => $this->pagination($page, $perPage, $total),
             'algorithm' => 'following',
+            'format' => $format,
         ];
     }
 
-    public function forYou(?array $user, int $page, int $perPage): array
+    public function forYou(?array $user, int $page, int $perPage, ?string $format = null): array
     {
-        return $this->ranked($user, $page, $perPage, true, (int) $this->app->config()->get('feed.window_days', 14), 'foryou');
+        return $this->ranked($user, $page, $perPage, true, (int) $this->app->config()->get('feed.window_days', 14), 'foryou', $format);
     }
 
-    public function explore(?array $user, int $page, int $perPage): array
+    public function explore(?array $user, int $page, int $perPage, ?string $format = null): array
     {
-        return $this->ranked($user, $page, $perPage, false, 7, 'explore');
+        return $this->ranked($user, $page, $perPage, false, 7, 'explore', $format);
     }
 
     public function trends(int $days, int $limit): array
@@ -123,12 +127,14 @@ final class FeedService
         ];
     }
 
-    private function ranked(?array $user, int $page, int $perPage, bool $affinity, int $windowDays, string $name): array
+    private function ranked(?array $user, int $page, int $perPage, bool $affinity, int $windowDays, string $name, ?string $format = null): array
     {
         $candidateLimit = (int) $this->app->config()->get('feed.candidate_limit', 240);
+        $format = $this->app->platform()->formatFilter($format);
+        [$durationClause, $durationParams] = $this->app->platform()->durationClause($format);
         $since = Str::now(-max(1, $windowDays) * 86400);
-        $where = "v.status = 'published' AND v.visibility = 'public' AND u.status = 'active' AND v.published_at >= ?";
-        $params = [$since];
+        $where = "v.status = 'published' AND v.visibility = 'public' AND u.status = 'active' AND v.published_at >= ? AND " . $durationClause;
+        $params = array_merge([$since], $durationParams);
 
         if ($user !== null) {
             $where .= ' AND v.user_id <> ?'
@@ -147,98 +153,38 @@ final class FeedService
              WHERE ' . $where . ' ORDER BY v.published_at DESC LIMIT ' . $candidateLimit,
             $params
         );
-
-        $following = [];
-
-        if ($user !== null && $affinity) {
-            $followingRows = $this->app->db()->fetchAll('SELECT following_id FROM follows WHERE follower_id = ?', [$user['id']]);
-            $following = array_fill_keys(array_column($followingRows, 'following_id'), true);
-        }
-
-        $halfLife = max(1, (int) $this->app->config()->get('feed.half_life_hours', 72));
-        $now = time();
-
-        foreach ($rows as &$row) {
-            $ageHours = max(0, ($now - Str::timestamp($row['published_at'])) / 3600);
-            $freshness = exp(-$ageHours / $halfLife);
-            $engagement = log1p((int) $row['like_count']) * 1.7
-                + log1p((int) $row['comment_count']) * 2.2
-                + log1p((int) $row['share_count']) * 1.8
-                + log1p((int) $row['save_count']) * 1.3
-                + log1p((int) $row['view_count']) * 0.22;
-            $rate = ((int) $row['like_count'] + (int) $row['comment_count'] * 2) / max(25, (int) $row['view_count']);
-            $score = $freshness * 4.0 + $engagement * 0.8 + min(3.0, $rate * 4.0);
-
-            if ($affinity && isset($following[$row['user_id']])) {
-                $score += 2.4;
-            }
-
-            $score += (crc32($row['id'] . ($user['id'] ?? 'guest')) % 1000) / 100000;
-            $row['_score'] = $score;
-        }
-
-        unset($row);
-
-        usort($rows, fn (array $a, array $b): int => $b['_score'] <=> $a['_score']);
-        $rows = $this->diversify($rows, (int) $this->app->config()->get('feed.max_per_author', 2));
+        $scored = $this->app->recommendations()->score($rows, $user, $affinity, $name);
+        $rows = $scored['rows'];
         $total = count($rows);
         $offset = ($page - 1) * $perPage;
         $sliced = array_slice($rows, $offset, $perPage);
+        $explanations = [];
 
         foreach ($sliced as &$row) {
-            unset($row['_score']);
+            $explanations[$row['id']] = $row['_explanation'] ?? null;
+            unset($row['_score'], $row['_explanation']);
         }
 
         unset($row);
+        $items = $this->app->videos()->payloads($sliced, $user['id'] ?? null);
+
+        foreach ($items as &$item) {
+            $item['recommendation'] = $explanations[$item['id']] ?? null;
+        }
+
+        unset($item);
 
         return [
-            'items' => $this->app->videos()->payloads($sliced, $user['id'] ?? null),
+            'items' => $items,
             'pagination' => $this->pagination($page, $perPage, $total),
-            'algorithm' => [
+            'algorithm' => array_merge($scored['meta'], [
                 'name' => $name,
                 'window_days' => $windowDays,
-                'half_life_hours' => $halfLife,
+                'half_life_hours' => max(1, (int) $this->app->config()->get('feed.half_life_hours', 72)),
+                'format' => $format,
                 'candidates' => $total,
-                'signals' => ['freshness', 'likes', 'comments', 'shares', 'saves', 'views', 'author_affinity', 'diversity'],
-            ],
+            ]),
         ];
-    }
-
-    private function diversify(array $rows, int $maxPerAuthor): array
-    {
-        if ($maxPerAuthor <= 0 || count($rows) < 3) {
-            return $rows;
-        }
-
-        $result = [];
-        $recent = [];
-        $pool = $rows;
-
-        while ($pool !== []) {
-            $picked = null;
-
-            foreach ($pool as $index => $row) {
-                $author = $row['user_id'];
-                $tail = array_slice($recent, -$maxPerAuthor);
-                $same = count(array_filter($tail, fn (string $id): bool => $id === $author));
-
-                if ($same < $maxPerAuthor) {
-                    $picked = $index;
-                    break;
-                }
-            }
-
-            if ($picked === null) {
-                $picked = 0;
-            }
-
-            $row = $pool[$picked];
-            $result[] = $row;
-            $recent[] = $row['user_id'];
-            array_splice($pool, $picked, 1);
-        }
-
-        return $result;
     }
 
     private function pagination(int $page, int $perPage, int $total): array

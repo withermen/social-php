@@ -290,6 +290,7 @@ final class AuthService
             'follower_count' => (int) $user['follower_count'],
             'following_count' => (int) $user['following_count'],
             'video_count' => (int) $user['video_count'],
+            'premium' => $this->app->premium()->summary($user['id']),
             'created_at' => $user['created_at'],
         ];
     }

@@ -38,8 +38,32 @@ final class SystemController extends Controller
                 'search',
                 'reports',
                 'moderation',
+                'content_analysis',
+                'interest_recommendations',
+                'short_long_hybrid_modes',
+                'commercial_licensing',
+                'advertising',
+                'premium_subscriptions',
             ],
         ]);
+    }
+
+    public function platform(): Response
+    {
+        return Response::data(array_merge($this->app->platform()->info(), [
+            'features' => [
+                'content_analysis' => (bool) $this->app->config()->get('analysis.enabled', true),
+                'ads' => (bool) $this->app->config()->get('ads.enabled', true),
+                'premium' => true,
+                'licensing' => $this->app->licenses()->status()['required'],
+            ],
+            'feed_formats' => ['short', 'long', 'all'],
+            'analysis' => [
+                'enabled' => (bool) $this->app->config()->get('analysis.enabled', true),
+                'engine' => 'ffmpeg-gd',
+                'signals' => ['scenes', 'motion', 'brightness', 'color', 'palette', 'audio', 'text_topics'],
+            ],
+        ]));
     }
 
     public function health(): Response

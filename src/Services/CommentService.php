@@ -120,6 +120,7 @@ final class CommentService
         }
 
         $this->notifyMentions($user, $videoId, $id, $clean['body']);
+        $this->app->analysis()->recordSignal($user['id'], $videoId, 'comment');
 
         return $this->mapRows([$this->find($id)], $user['id'], false)[0];
     }

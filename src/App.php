@@ -14,11 +14,17 @@ use Social\Mail\LogMailer;
 use Social\Mail\MailerInterface;
 use Social\Media\MediaProcessor;
 use Social\Services\AdminService;
+use Social\Services\AdService;
+use Social\Services\AnalysisService;
 use Social\Services\CommentService;
 use Social\Services\FeedService;
+use Social\Services\LicenseService;
 use Social\Services\MessageService;
 use Social\Services\NotificationService;
+use Social\Services\PlatformService;
+use Social\Services\PremiumService;
 use Social\Services\RateLimiter;
+use Social\Services\RecommendationService;
 use Social\Services\ReportService;
 use Social\Services\SearchService;
 use Social\Services\UploadService;
@@ -90,8 +96,17 @@ final class App
         }
 
         $started = microtime(true);
+        $licenseStatus = null;
+        $licenseExempt = str_starts_with($request->path, '/api/v1/license')
+            || $request->path === '/api/v1/health'
+            || $request->path === '/api/v1'
+            || $request->path === '/';
 
         try {
+            if (!$licenseExempt) {
+                $licenseStatus = $this->licenses()->guard();
+            }
+
             $response = $this->router->dispatch($request);
         } catch (ValidationException $exception) {
             $response = Response::error($exception->errorCode, $exception->getMessage(), $exception->status, $exception->details);
@@ -114,6 +129,8 @@ final class App
 
         $response->header('X-Request-Id', $requestId);
         $response->header('X-Response-Time', (string) round((microtime(true) - $started) * 1000, 2));
+        $licenseStatus ??= $this->licenses()->status();
+        $response->header('X-License-Status', $licenseStatus['valid'] ? ($licenseStatus['licensed'] ? 'licensed' : 'not-required') : 'invalid');
         $response->header('X-Content-Type-Options', 'nosniff');
         $response->header('X-Frame-Options', 'DENY');
         $response->header('Referrer-Policy', 'no-referrer');
@@ -245,6 +262,36 @@ final class App
     public function admin(): AdminService
     {
         return $this->services[AdminService::class] ??= new AdminService($this);
+    }
+
+    public function platform(): PlatformService
+    {
+        return $this->services[PlatformService::class] ??= new PlatformService($this);
+    }
+
+    public function analysis(): AnalysisService
+    {
+        return $this->services[AnalysisService::class] ??= new AnalysisService($this);
+    }
+
+    public function recommendations(): RecommendationService
+    {
+        return $this->services[RecommendationService::class] ??= new RecommendationService($this);
+    }
+
+    public function licenses(): LicenseService
+    {
+        return $this->services[LicenseService::class] ??= new LicenseService($this);
+    }
+
+    public function premium(): PremiumService
+    {
+        return $this->services[PremiumService::class] ??= new PremiumService($this);
+    }
+
+    public function ads(): AdService
+    {
+        return $this->services[AdService::class] ??= new AdService($this);
     }
 
     public function url(string $path = ''): string

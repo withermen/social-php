@@ -44,6 +44,28 @@ final class AdminService
                 'open' => (int) $db->value("SELECT COUNT(*) FROM reports WHERE status = 'open'"),
                 'total' => (int) $db->value('SELECT COUNT(*) FROM reports'),
             ],
+            'analysis' => [
+                'analyzed' => (int) $db->value("SELECT COUNT(*) FROM video_analysis WHERE status = 'complete'"),
+                'with_audio' => (int) $db->value('SELECT COUNT(*) FROM video_analysis WHERE has_audio = 1'),
+                'topics' => (int) $db->value('SELECT COUNT(DISTINCT topic) FROM video_topics'),
+            ],
+            'ads' => [
+                'campaigns' => (int) $db->value('SELECT COUNT(*) FROM ad_campaigns'),
+                'active' => (int) $db->value("SELECT COUNT(*) FROM ad_campaigns WHERE status = 'active'"),
+                'impressions' => (int) $db->value("SELECT COUNT(*) FROM ad_events WHERE type = 'impression'"),
+                'clicks' => (int) $db->value("SELECT COUNT(*) FROM ad_events WHERE type = 'click'"),
+                'spend_cents' => (int) $db->value('SELECT COALESCE(SUM(spent_cents), 0) FROM ad_campaigns'),
+            ],
+            'premium' => [
+                'active_subscriptions' => (int) $db->value("SELECT COUNT(*) FROM subscriptions WHERE status = 'active'"),
+                'plans' => (int) $db->value("SELECT COUNT(*) FROM premium_plans WHERE status = 'active'"),
+                'mrr_cents' => (int) $db->value("SELECT COALESCE(SUM(p.price_cents), 0) FROM subscriptions s JOIN premium_plans p ON p.id = s.plan_id WHERE s.status = 'active'"),
+            ],
+            'licensing' => [
+                'active' => (int) $db->value("SELECT COUNT(*) FROM license_keys WHERE status = 'active'"),
+                'total' => (int) $db->value('SELECT COUNT(*) FROM license_keys'),
+                'revenue_cents' => (int) $db->value("SELECT COALESCE(SUM(amount_cents), 0) FROM license_orders WHERE status = 'paid'"),
+            ],
         ];
     }
 

@@ -10,8 +10,13 @@ Kısa ve uzun video sosyal medya ürünleri için sıfırdan yazılmış, kendi 
 - Takip, keşfet, trend, hashtag ve kişiselleştirilmiş akış.
 - Yorum, yanıt, beğeni, kaydetme, paylaşma, görüntüleme.
 - Bildirimler, direkt mesajlar, arama, şikayet ve admin moderasyonu.
-- FFmpeg varsa otomatik süre çözünürlük ve kapak görseli; yoksa güvenli fallback.
-- Test edilmiş 60+ endpoint.
+- FFmpeg ve GD ile gerçek video içerik analizi: sahne kesmeleri, ses, hareket, renk paleti, algısal hash ve konu çıkarımı.
+- İlgi alanı vektörü, izleme geçmişi ve negatif geri bildirimle kişiselleştirilmiş öneriler.
+- Short-only, long-only ve hybrid platform modları; akışlarda format filtresi.
+- Ticari kullanım lisansları: sipariş, imzalı anahtar, aktivasyon limiti, iptal ve webhook.
+- Reklam kampanyaları: hedefleme, frekans sınırı, CPM/CPC harcama ve bütçe tamamlama.
+- Premium abonelikler: planlar, yetkiler, reklamsız deneyim, yükleme limitleri ve webhook.
+- Test edilmiş 100+ endpoint.
 
 ## Gereksinimler
 
@@ -123,6 +128,7 @@ Tüm endpoint'ler `/api/v1` altındadır. `Auth` kolonu `Bearer` token gerektiri
 | --- | --- | --- | --- |
 | GET | `/` | - | API bilgisi |
 | GET | `/health` | - | Veritabanı ve storage sağlığı |
+| GET | `/platform` | - | Platform modu, format kuralları ve aktif özellikler |
 | GET | `/media/{path}` | - | Avatar ve kapak görselleri |
 
 ### Hesap
@@ -179,8 +185,13 @@ Tüm endpoint'ler `/api/v1` altındadır. `Auth` kolonu `Bearer` token gerektiri
 | DELETE | `/videos/{id}/save` | Auth | Kaydı kaldır |
 | POST | `/videos/{id}/share` | Optional | Paylaşım sayacı |
 | GET | `/videos/{id}/likes` | Optional | Beğenenler |
+| GET | `/videos/{id}/analysis` | Optional | İçerik analizi sonucu |
+| POST | `/videos/{id}/analyze` | Auth | Analizi zorla yeniden çalıştır |
+| POST | `/videos/{id}/watch` | Optional | İzleme ilerlemesi ve tamamlanma |
+| POST | `/videos/{id}/not-interested` | Auth | Negatif geri bildirim |
+| DELETE | `/videos/{id}/not-interested` | Auth | Geri bildirimi kaldır |
 
-Görünürlük değerleri: `public`, `unlisted`, `private`.
+Görünürlük değerleri: `public`, `unlisted`, `private`. Yükleme yanıtı `format` (`short` veya `long`) ve analizden çıkan `topics` alanlarını içerir.
 
 ### Yorumlar
 
@@ -202,9 +213,16 @@ Yanıt için `parent_id` gönderilir. Yanıt derinliği tek seviyedir; bir yanı
 | --- | --- | --- | --- |
 | GET | `/feed/following` | Auth | Takip edilenlerin akışı |
 | GET | `/feed/foryou` | Optional | Kişiselleştirilmiş akış |
+| GET | `/feed/shorts` | Optional | Yalnızca kısa videolar |
+| GET | `/feed/long` | Optional | Yalnızca uzun videolar |
 | GET | `/explore` | Optional | Trend videolar |
 | GET | `/trends?days=7&limit=20` | Optional | Trend hashtag'ler |
 | GET | `/hashtags/{tag}` | Optional | Hashtag akışı |
+| GET | `/recommendations/interests` | Auth | İlgi alanı profili |
+| PUT | `/recommendations/interests` | Auth | Açık ilgi alanlarını ayarla |
+| DELETE | `/recommendations/interests` | Auth | Açık ilgi alanlarını temizle |
+
+Tüm akış endpoint'leri `format=short|long|all` query parametresini kabul eder. Hybrid modda varsayılan `all`, short-only veya long-only modda ilgili format zorunludur.
 
 ### Arama
 
@@ -253,6 +271,93 @@ Sohbet başlatmak için `username` veya `user_id` gönderilir.
 | POST | `/admin/videos/{id}/restore` | Auth | admin, moderator | Videoyu geri al |
 
 Şikayet nedenleri: `spam`, `harassment`, `hate`, `nudity`, `violence`, `self_harm`, `misinformation`, `copyright`, `impersonation`, `other`.
+
+### Reklamlar
+
+| Method | Endpoint | Auth | Açıklama |
+| --- | --- | --- | --- |
+| GET | `/ads/serve?placement=feed` | Optional | Hedeflemeye uygun reklam döner |
+| POST | `/ads/{id}/click` | Optional | Tıklama kaydı ve hedef URL |
+| GET | `/ads/campaigns` | Auth | Kampanyalar |
+| POST | `/ads/campaigns` | Auth | Kampanya oluştur |
+| GET | `/ads/campaigns/{id}` | Auth | Kampanya ve kreatifleri |
+| PATCH | `/ads/campaigns/{id}` | Auth | Kampanya güncelle |
+| POST | `/ads/campaigns/{id}/creatives` | Auth | Kreatif ekle |
+| GET | `/ads/campaigns/{id}/stats` | Auth | Gösterim, tıklama, CTR ve harcama |
+| POST | `/admin/ads/{id}/status` | Auth | Admin kampanya durumu |
+
+Kampanya alanları: `name`, `placement` (`feed`, `explore`, `all`), `objective` (`impressions`, `clicks`), `budget_cents`, `bid_cents`, `targeting`, `starts_at`, `ends_at`. `targeting` içinde `topics` ve `formats` bulunur. Kreatif alanları: `title`, `body`, `cta_label`, `click_url`, `image_url`, `video_id`, `weight`; ayrıca multipart `image` gönderilebilir.
+
+Premium kullanıcılar reklam görmez. Saatlik gösterim sınırı `ADS_FREQUENCY_PER_HOUR` ile belirlenir. Bütçesi tükenen kampanya otomatik olarak `completed` olur.
+
+### Premium Abonelik
+
+| Method | Endpoint | Auth | Açıklama |
+| --- | --- | --- | --- |
+| GET | `/premium/plans` | - | Aktif planlar |
+| GET | `/premium/status` | Auth | Kullanıcının premium durumu |
+| GET | `/me/subscription` | Auth | Abonelik detayı |
+| POST | `/premium/subscribe` | Auth | Plan seç |
+| POST | `/premium/cancel` | Auth | Dönem sonunda iptal |
+| POST | `/premium/webhook` | - | İmzalı ödeme webhook'u |
+| POST | `/admin/subscriptions` | Auth | Admin hediye abonelik |
+
+Planlar `config/social.php` içindeki `premium.plans` bölümünden tanımlanır ve veritabanına otomatik eklenir. Yetkiler: `ad_free`, `premium_badge`, `larger_uploads`, `longer_videos`, `creator_analytics`, `priority_delivery`, `max_upload_size`, `max_duration`. Premium yükleme limitleri `VideoService` tarafından zorunlu tutulur.
+
+Webhook `x-payment-signature` başlığında `sha256=<hmac>` taşır. Desteklenen olaylar: `subscription.activated`, `invoice.paid`, `subscription.canceled`.
+
+### Ticari Lisans
+
+| Method | Endpoint | Auth | Açıklama |
+| --- | --- | --- | --- |
+| GET | `/license/plans` | - | Lisans planları |
+| GET | `/license/status` | Auth | Lisans durumu (admin) |
+| POST | `/license/activate` | - | Kurulum aktivasyonu |
+| POST | `/license/checkout` | - | Lisans siparişi |
+| POST | `/license/webhook` | - | İmzalı ödeme webhook'u |
+| GET | `/admin/licenses` | Auth | Lisans listesi |
+| POST | `/admin/licenses` | Auth | Manuel lisans üret |
+| POST | `/admin/licenses/{id}/revoke` | Auth | Lisansı iptal et |
+
+Lisans anahtarları veritabanında hash'lenir, yalnızca üretim anında bir kez açık gösterilir. `LICENSE_PRIVATE_KEY` tanımlıysa `soc1.<payload>.<signature>` biçiminde imzalı anahtar üretilir ve `LICENSE_PUBLIC_KEY` ile doğrulanır. Aktivasyonlar `installation_id` bazında sayılır ve `max_activations` sınırı uygulanır.
+
+Zorlama modları: `off` (kapalı), `warn` (yanıt verir, `X-License-Status: invalid` başlığı ekler), `enforce` (lisans yoksa 402 `license_required`). `/api/v1/license*`, `/api/v1/health`, `/api/v1` ve `/` her zaman muaftır.
+
+## İçerik Analizi
+
+Yükleme sonrası video FFmpeg/FFprobe ve GD ile analiz edilir. Sonuç `video_analysis` ve `video_topics` tablolarına yazılır.
+
+- Sahne kesmeleri: `scene` filtresi ve `showinfo` ile kesme zamanları, kesme oranı.
+- Ses: `volumedetect` ile ortalama/tepe ses, `silencedetect` ile sessizlik oranı.
+- Görsel: örneklenen karelerden parlaklık, doygunluk, kontrast, renklilik, hareket ve baskın renk paleti.
+- Algısal hash: ilk kareden 64 bit dHash, benzer içerik tespiti için.
+- Konular: hashtag'ler, başlık/açıklama metni, süre formatı, en-boy oranı, ışık, renk, hareket, kesme hızı ve ses özelliklerinden ağırlıklı konu vektörü.
+
+Analiz `ANALYSIS_ENABLED=false` ile kapatılabilir. `ANALYSIS_FRAME_SAMPLES` örnek kare sayısını, `ANALYSIS_FRAME_WIDTH` kare genişliğini, `ANALYSIS_SCENE_THRESHOLD` sahne eşiğini belirler. FFmpeg yoksa analiz yükleme akışını bozmaz; metin ve format tabanlı konular yine üretilir.
+
+## Platform Modları
+
+`PLATFORM_MODE` üç değer alır:
+
+- `short`: yalnızca `PLATFORM_SHORT_MAX_DURATION` saniyeye kadar videolar kabul edilir.
+- `long`: yalnızca `PLATFORM_LONG_MIN_DURATION` saniye ve üzeri videolar kabul edilir.
+- `hybrid`: her iki format da kabul edilir; akışlar format filtresiyle ayrılır.
+
+`PLATFORM_ENFORCE_UPLOAD_MODE=false` yükleme kontrolünü kapatır, akış filtreleri çalışmaya devam eder.
+
+## Öneri Motoru
+
+`/feed/foryou` ve `/explore` adayları şu sinyallerle puanlanır:
+
+- Tazelik ve etkileşim: yarı ömürlü üstel azalma, beğeni/yorum/paylaşım/kaydetme/görüntüleme.
+- İçerik konuları: video konu vektörü ile kalite sinyalleri.
+- İlgi profili: beğeni, kaydetme, paylaşma, yorum, izleme, tamamlama, takip ve açık ilgi alanlarından oluşan kosinüs benzerliği.
+- Yazar yakınlığı: takip edilen içerik üreticilerine ek puan.
+- İzleme geçmişi: daha önce izlenen videolara ceza.
+- Negatif geri bildirim: `not-interested` videolarına güçlü ceza.
+- Çeşitlilik: aynı yazardan üst üste en fazla `feed.max_per_author` video.
+
+Her akış öğesi `recommendation` alanında `score`, `interest_match`, `matched_topics` ve `reasons` açıklamasını taşır. İlgi skorları `ANALYSIS_INTEREST_HALF_LIFE_DAYS` ile zamanla azalır.
 
 ## Parçalı Video Yükleme
 
@@ -365,15 +470,7 @@ Erişim kuralları:
 
 ## Akış Algoritması
 
-`/feed/foryou` son 14 günün adaylarını çeker ve şu sinyalleri puanlar:
-
-- Tazelik: 72 saatlik yarı ömürle üstel azalma.
-- Etkileşim: beğeni, yorum, paylaşım, kaydetme ve görüntüleme sayıları.
-- Etkileşim oranı: görüntülemeye göre beğeni ve yorum yoğunluğu.
-- Yazar yakınlığı: takip edilen yazara ek puan.
-- Çeşitlilik: aynı yazardan üst üste en fazla 2 video.
-
-Parametreler `config/social.php` içindeki `feed` bölümünden değiştirilir:
+`/feed/foryou` son 14 günün adaylarını çeker ve öneri motoruyla puanlar. Ağırlıklar `config/social.php` içindeki `feed` bölümünden değiştirilir:
 
 ```php
 'feed' => [
@@ -381,10 +478,15 @@ Parametreler `config/social.php` içindeki `feed` bölümünden değiştirilir:
     'window_days' => 14,
     'half_life_hours' => 72,
     'max_per_author' => 2,
+    'interest_weight' => 4.2,
+    'content_weight' => 2.6,
+    'following_weight' => 2.4,
+    'seen_penalty' => 2.8,
+    'negative_penalty' => 12.0,
 ],
 ```
 
-`following` akışı kronolojiktir. `explore` son 7 günün etkileşim ağırlıklı sıralamasıdır. `trends` hashtag'lerin son 7 gündeki görüntüleme ve beğeni toplamına göre sıralanır.
+`following` akışı kronolojiktir ve format filtresi uygular. `explore` son 7 günün etkileşim ve ilgi ağırlıklı sıralamasıdır. `trends` hashtag'lerin son 7 gündeki görüntüleme ve beğeni toplamına göre sıralanır.
 
 ## Veritabanı
 
@@ -447,6 +549,15 @@ UPLOAD_MAX_CHUNK=8388608
 UPLOAD_MAX_DURATION=600
 MEDIA_FFMPEG=ffmpeg
 MEDIA_FFPROBE=ffprobe
+PLATFORM_MODE=hybrid
+PLATFORM_SHORT_MAX_DURATION=180
+PLATFORM_LONG_MIN_DURATION=180
+ANALYSIS_ENABLED=true
+ADS_ENABLED=true
+ADS_FREQUENCY_PER_HOUR=12
+LICENSING_ENABLED=false
+LICENSING_ENFORCEMENT=off
+LICENSE_KEY=
 CORS_ALLOWED_ORIGINS=https://app.example.com
 TRUST_PROXY=false
 ```
@@ -465,7 +576,7 @@ max_execution_time = 120
 php tests/run.php
 ```
 
-Test paketi geçici bir veritabanı ve depolama alanı oluşturur. Kayıt, giriş, token yenileme, profil, avatar, takip, video yükleme, kapak görseli, range stream, görüntüleme tekrarı, beğeni, kaydetme, yorum, yanıt, akış, keşfet, trend, arama, bildirim, mesaj, parçalı yükleme, moderasyon, ban, şifre sıfırlama ve yetki sınırları test edilir.
+Test paketi geçici bir veritabanı ve depolama alanı oluşturur. Kayıt, giriş, token yenileme, profil, avatar, takip, video yükleme, kapak görseli, range stream, görüntüleme tekrarı, beğeni, kaydetme, yorum, yanıt, akış, keşfet, trend, arama, bildirim, mesaj, parçalı yükleme, moderasyon, ban, şifre sıfırlama, yetki sınırları, platform modları, içerik analizi, format filtreli öneriler, lisans yaşam döngüsü ve zorlaması, reklam hedefleme/frekans/bütçe ve premium abonelik akışları test edilir.
 
 ## Üretim Kontrol Listesi
 
@@ -480,7 +591,10 @@ Test paketi geçici bir veritabanı ve depolama alanı oluşturur. Kayıt, giri�
 - Yedekleme hem veritabanını hem `storage/app` dizinini kapsıyor.
 - Şikayet ve moderasyon akışı operasyonel.
 - Rate limit değerleri trafiğe göre ayarlandı.
+- Reklam bütçeleri ve premium plan fiyatları gözden geçirildi.
+- Ticari kullanım için `LICENSING_ENABLED=true` ve `LICENSING_ENFORCEMENT=enforce` yapılandırıldı.
+- Ödeme ve lisans webhook sırları güçlü ve yalnızca sunucuda tanımlı.
 
 ## Lisans
 
-MIT. Ayrıntılar için `LICENSE` dosyasına bakın.
+Kod MIT lisanslıdır; ayrıntılar için `LICENSE` dosyasına bakın. Ticari kullanım için yerleşik lisans sistemi anahtar üretir, aktivasyonları sınırlar ve `enforce` modunda lisanssız çalışmayı engeller.

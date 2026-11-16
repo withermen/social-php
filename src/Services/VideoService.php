@@ -30,7 +30,8 @@ final class VideoService
             'visibility' => 'nullable|in:public,unlisted,private',
         ]);
         $config = $this->app->config();
-        $maxSize = (int) $config->get('uploads.max_size', 536870912);
+        $entitlements = $this->app->premium()->entitlements($user['id']);
+        $maxSize = (int) ($entitlements['max_upload_size'] ?? $config->get('uploads.max_size', 536870912));
 
         if ($size <= 0 || !is_file($sourcePath)) {
             throw new ValidationException(['video' => 'Video file is missing or empty.']);
@@ -52,11 +53,13 @@ final class VideoService
         }
 
         $probe = $this->app->media()->probe($sourcePath) ?? ['duration' => 0, 'width' => 0, 'height' => 0];
-        $maxDuration = (int) $config->get('uploads.max_duration', 600);
+        $maxDuration = (int) ($entitlements['max_duration'] ?? $config->get('uploads.max_duration', 600));
 
         if ($maxDuration > 0 && $probe['duration'] > $maxDuration) {
             throw ApiException::badRequest('Video is longer than the allowed duration.');
         }
+
+        $this->app->platform()->assertDuration((int) $probe['duration']);
 
         $id = Str::id();
         $now = Str::now();
@@ -126,6 +129,11 @@ final class VideoService
             throw $exception;
         }
 
+        try {
+            $this->app->analysis()->analyze($id);
+        } catch (\Throwable) {
+        }
+
         $row = $this->findRow($id);
 
         return $this->payloads([$row], $user['id'])[0];
@@ -137,6 +145,46 @@ final class VideoService
         $rows = $this->payloads([$row], $viewerId);
 
         return $rows[0];
+    }
+
+    public function analyze(array $user, string $id): array
+    {
+        $row = $this->findAccessible($id, $user['id']);
+
+        if ($row['user_id'] !== $user['id'] && !in_array($user['role'], ['admin', 'moderator'], true)) {
+            throw ApiException::forbidden('You cannot analyze this video.');
+        }
+
+        $analysis = $this->app->analysis()->analyze($id, true);
+
+        if ($analysis === null) {
+            throw ApiException::badRequest('Video analysis is disabled.');
+        }
+
+        return $analysis;
+    }
+
+    public function analysis(string $id, ?string $viewerId): array
+    {
+        return $this->app->analysis()->get($id, $viewerId);
+    }
+
+    public function watch(?array $user, string $id, int $position, int $duration): array
+    {
+        $this->findAccessible($id, $user['id'] ?? null);
+
+        if ($user === null) {
+            return [
+                'video_id' => $id,
+                'position_seconds' => max(0, $position),
+                'duration_seconds' => max(0, $duration),
+                'watch_ratio' => 0.0,
+                'completed' => false,
+                'personalized' => false,
+            ];
+        }
+
+        return $this->app->analysis()->recordWatch($user, $id, $position, $duration);
     }
 
     public function findAccessible(string $id, ?string $viewerId): array
@@ -308,6 +356,7 @@ final class VideoService
                 ]);
                 $this->app->db()->run('UPDATE videos SET like_count = like_count + 1 WHERE id = ?', [$id]);
             });
+            $this->app->analysis()->recordSignal($user['id'], $id, 'like');
             $this->app->notifications()->create($row['user_id'], $user['id'], 'like', 'video', $id, [
                 'title' => $row['title'],
                 'thumbnail_url' => $row['thumbnail_path'] ? $this->app->assetUrl($row['thumbnail_path']) : null,
@@ -335,6 +384,7 @@ final class VideoService
                     [$id]
                 );
             });
+            $this->app->analysis()->recordSignal($user['id'], $id, 'unlike');
         }
 
         $count = (int) $this->app->db()->value('SELECT like_count FROM videos WHERE id = ?', [$id]);
@@ -356,6 +406,7 @@ final class VideoService
                 ]);
                 $this->app->db()->run('UPDATE videos SET save_count = save_count + 1 WHERE id = ?', [$id]);
             });
+            $this->app->analysis()->recordSignal($user['id'], $id, 'save');
         }
 
         $count = (int) $this->app->db()->value('SELECT save_count FROM videos WHERE id = ?', [$id]);
@@ -375,6 +426,7 @@ final class VideoService
                     [$id]
                 );
             });
+            $this->app->analysis()->recordSignal($user['id'], $id, 'unsave');
         }
 
         $count = (int) $this->app->db()->value('SELECT save_count FROM videos WHERE id = ?', [$id]);
@@ -400,6 +452,11 @@ final class VideoService
             ]);
             $this->app->db()->run('UPDATE videos SET share_count = share_count + 1 WHERE id = ?', [$id]);
         });
+
+        if ($user !== null) {
+            $this->app->analysis()->recordSignal($user['id'], $id, 'share');
+        }
+
         $count = (int) $this->app->db()->value('SELECT share_count FROM videos WHERE id = ?', [$id]);
 
         return [
@@ -442,6 +499,10 @@ final class VideoService
                     [$id]
                 );
             });
+
+            if ($user !== null) {
+                $this->app->analysis()->recordSignal($user['id'], $id, 'view');
+            }
         }
 
         $count = (int) $this->app->db()->value('SELECT view_count FROM videos WHERE id = ?', [$id]);
@@ -482,14 +543,23 @@ final class VideoService
 
         $ids = array_values(array_unique(array_map(fn (array $row): string => $row['id'], $rows)));
         $tags = [];
+        $topics = [];
         $placeholders = implode(', ', array_fill(0, count($ids), '?'));
         $tagRows = $this->app->db()->fetchAll(
             'SELECT vh.video_id, h.tag FROM video_hashtags vh JOIN hashtags h ON h.id = vh.hashtag_id WHERE vh.video_id IN (' . $placeholders . ') ORDER BY h.tag ASC',
             $ids
         );
+        $topicRows = $this->app->db()->fetchAll(
+            'SELECT video_id, topic FROM video_topics WHERE video_id IN (' . $placeholders . ') ORDER BY weight DESC',
+            $ids
+        );
 
         foreach ($tagRows as $tagRow) {
             $tags[$tagRow['video_id']][] = $tagRow['tag'];
+        }
+
+        foreach ($topicRows as $topicRow) {
+            $topics[$topicRow['video_id']][] = $topicRow['topic'];
         }
 
         $liked = [];
@@ -516,14 +586,15 @@ final class VideoService
                 $viewerId,
                 isset($liked[$row['id']]),
                 isset($saved[$row['id']]),
-                $tags[$row['id']] ?? []
+                $tags[$row['id']] ?? [],
+                $topics[$row['id']] ?? []
             );
         }
 
         return $items;
     }
 
-    private function payload(array $row, ?string $viewerId, bool $liked, bool $saved, array $tags): array
+    private function payload(array $row, ?string $viewerId, bool $liked, bool $saved, array $tags, array $topics = []): array
     {
         $author = isset($row['author_username'])
             ? [
@@ -540,6 +611,7 @@ final class VideoService
             'title' => $row['title'],
             'description' => $row['description'],
             'visibility' => $row['visibility'],
+            'format' => $this->app->platform()->formatOf((int) $row['duration']),
             'duration' => (int) $row['duration'],
             'width' => (int) $row['width'],
             'height' => (int) $row['height'],
@@ -549,6 +621,7 @@ final class VideoService
             'stream_url' => $this->app->url('/api/v1/videos/' . $row['id'] . '/stream'),
             'share_url' => $this->app->url('/v/' . $row['id']),
             'tags' => $tags,
+            'topics' => $topics,
             'author' => $author,
             'like_count' => (int) $row['like_count'],
             'comment_count' => (int) $row['comment_count'],

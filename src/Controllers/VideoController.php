@@ -44,6 +44,26 @@ final class VideoController extends Controller
         return Response::data($this->app->videos()->update($request->user(), $id, $request->all()));
     }
 
+    public function analysis(Request $request, string $id): Response
+    {
+        return Response::data($this->app->videos()->analysis($id, $request->userId()));
+    }
+
+    public function analyze(Request $request, string $id): Response
+    {
+        return Response::data($this->app->videos()->analyze($request->user(), $id));
+    }
+
+    public function watch(Request $request, string $id): Response
+    {
+        return Response::data($this->app->videos()->watch(
+            $request->user(),
+            $id,
+            (int) ($request->input('position') ?? $request->input('position_seconds') ?? 0),
+            (int) ($request->input('duration') ?? $request->input('duration_seconds') ?? 0)
+        ));
+    }
+
     public function destroy(Request $request, string $id): Response
     {
         $this->app->videos()->delete($request->user(), $id);

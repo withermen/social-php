@@ -1,12 +1,16 @@
 <?php
 
 use Social\App;
+use Social\Controllers\AdController;
 use Social\Controllers\AdminController;
 use Social\Controllers\AuthController;
 use Social\Controllers\CommentController;
 use Social\Controllers\FeedController;
+use Social\Controllers\LicenseController;
 use Social\Controllers\MessageController;
 use Social\Controllers\NotificationController;
+use Social\Controllers\PremiumController;
+use Social\Controllers\RecommendationController;
 use Social\Controllers\ReportController;
 use Social\Controllers\SearchController;
 use Social\Controllers\SystemController;
@@ -29,10 +33,15 @@ return function (App $app, Router $router): void {
     $messages = new MessageController($app);
     $reports = new ReportController($app);
     $admin = new AdminController($app);
+    $recommendations = new RecommendationController($app);
+    $licenses = new LicenseController($app);
+    $premium = new PremiumController($app);
+    $ads = new AdController($app);
 
     $router->get('/', fn (Request $request): \Social\Http\Response => $system->index());
     $router->get('/api/v1', fn (Request $request): \Social\Http\Response => $system->index());
     $router->get('/api/v1/health', fn (Request $request): \Social\Http\Response => $system->health());
+    $router->get('/api/v1/platform', fn (Request $request): \Social\Http\Response => $system->platform());
     $router->get('/media/{path:.+}', fn (Request $request, array $params): \Social\Http\Response => $system->media($request, $params['path']));
 
     $router->post('/api/v1/auth/register', fn (Request $request): \Social\Http\Response => $auth->register($request));
@@ -68,6 +77,11 @@ return function (App $app, Router $router): void {
     $router->patch('/api/v1/videos/{id}', fn (Request $request, array $params): \Social\Http\Response => $videos->update($request, $params['id']), ['auth' => true]);
     $router->delete('/api/v1/videos/{id}', fn (Request $request, array $params): \Social\Http\Response => $videos->destroy($request, $params['id']), ['auth' => true]);
     $router->get('/api/v1/videos/{id}/stream', fn (Request $request, array $params): \Social\Http\Response => $videos->stream($request, $params['id']), ['auth' => 'optional']);
+    $router->get('/api/v1/videos/{id}/analysis', fn (Request $request, array $params): \Social\Http\Response => $videos->analysis($request, $params['id']), ['auth' => 'optional']);
+    $router->post('/api/v1/videos/{id}/analyze', fn (Request $request, array $params): \Social\Http\Response => $videos->analyze($request, $params['id']), ['auth' => true]);
+    $router->post('/api/v1/videos/{id}/watch', fn (Request $request, array $params): \Social\Http\Response => $videos->watch($request, $params['id']), ['auth' => 'optional']);
+    $router->post('/api/v1/videos/{id}/not-interested', fn (Request $request, array $params): \Social\Http\Response => $recommendations->notInterested($request, $params['id']), ['auth' => true]);
+    $router->delete('/api/v1/videos/{id}/not-interested', fn (Request $request, array $params): \Social\Http\Response => $recommendations->clearNotInterested($request, $params['id']), ['auth' => true]);
     $router->post('/api/v1/videos/{id}/view', fn (Request $request, array $params): \Social\Http\Response => $videos->view($request, $params['id']), ['auth' => 'optional']);
     $router->post('/api/v1/videos/{id}/like', fn (Request $request, array $params): \Social\Http\Response => $videos->like($request, $params['id']), ['auth' => true]);
     $router->delete('/api/v1/videos/{id}/like', fn (Request $request, array $params): \Social\Http\Response => $videos->unlike($request, $params['id']), ['auth' => true]);
@@ -92,7 +106,12 @@ return function (App $app, Router $router): void {
 
     $router->get('/api/v1/feed/following', fn (Request $request): \Social\Http\Response => $feeds->following($request), ['auth' => true]);
     $router->get('/api/v1/feed/foryou', fn (Request $request): \Social\Http\Response => $feeds->forYou($request), ['auth' => 'optional']);
+    $router->get('/api/v1/feed/shorts', fn (Request $request): \Social\Http\Response => $feeds->shorts($request), ['auth' => 'optional']);
+    $router->get('/api/v1/feed/long', fn (Request $request): \Social\Http\Response => $feeds->longform($request), ['auth' => 'optional']);
     $router->get('/api/v1/explore', fn (Request $request): \Social\Http\Response => $feeds->explore($request), ['auth' => 'optional']);
+    $router->get('/api/v1/recommendations/interests', fn (Request $request): \Social\Http\Response => $recommendations->interests($request), ['auth' => true]);
+    $router->put('/api/v1/recommendations/interests', fn (Request $request): \Social\Http\Response => $recommendations->updateInterests($request), ['auth' => true]);
+    $router->delete('/api/v1/recommendations/interests', fn (Request $request): \Social\Http\Response => $recommendations->clearInterests($request), ['auth' => true]);
     $router->get('/api/v1/trends', fn (Request $request): \Social\Http\Response => $feeds->trends($request), ['auth' => 'optional']);
     $router->get('/api/v1/hashtags/{tag}', fn (Request $request, array $params): \Social\Http\Response => $feeds->hashtag($request, $params['tag']), ['auth' => 'optional']);
     $router->get('/api/v1/search', fn (Request $request): \Social\Http\Response => $search->search($request), ['auth' => 'optional']);
@@ -109,6 +128,28 @@ return function (App $app, Router $router): void {
     $router->post('/api/v1/conversations/{id}/messages', fn (Request $request, array $params): \Social\Http\Response => $messages->send($request, $params['id']), ['auth' => true]);
     $router->post('/api/v1/conversations/{id}/read', fn (Request $request, array $params): \Social\Http\Response => $messages->read($request, $params['id']), ['auth' => true]);
 
+    $router->get('/api/v1/license/plans', fn (Request $request): \Social\Http\Response => $licenses->plans());
+    $router->get('/api/v1/license/status', fn (Request $request): \Social\Http\Response => $licenses->status(), ['auth' => true, 'role' => ['admin']]);
+    $router->post('/api/v1/license/activate', fn (Request $request): \Social\Http\Response => $licenses->activate($request));
+    $router->post('/api/v1/license/checkout', fn (Request $request): \Social\Http\Response => $licenses->checkout($request));
+    $router->post('/api/v1/license/webhook', fn (Request $request): \Social\Http\Response => $licenses->webhook($request));
+
+    $router->get('/api/v1/premium/plans', fn (Request $request): \Social\Http\Response => $premium->plans());
+    $router->get('/api/v1/premium/status', fn (Request $request): \Social\Http\Response => $premium->status($request), ['auth' => true]);
+    $router->get('/api/v1/me/subscription', fn (Request $request): \Social\Http\Response => $premium->subscription($request), ['auth' => true]);
+    $router->post('/api/v1/premium/subscribe', fn (Request $request): \Social\Http\Response => $premium->subscribe($request), ['auth' => true]);
+    $router->post('/api/v1/premium/cancel', fn (Request $request): \Social\Http\Response => $premium->cancel($request), ['auth' => true]);
+    $router->post('/api/v1/premium/webhook', fn (Request $request): \Social\Http\Response => $premium->webhook($request));
+
+    $router->get('/api/v1/ads/serve', fn (Request $request): \Social\Http\Response => $ads->serve($request), ['auth' => 'optional']);
+    $router->post('/api/v1/ads/{id}/click', fn (Request $request, array $params): \Social\Http\Response => $ads->click($request, $params['id']), ['auth' => 'optional']);
+    $router->get('/api/v1/ads/campaigns', fn (Request $request): \Social\Http\Response => $ads->index($request), ['auth' => true]);
+    $router->post('/api/v1/ads/campaigns', fn (Request $request): \Social\Http\Response => $ads->store($request), ['auth' => true]);
+    $router->get('/api/v1/ads/campaigns/{id}', fn (Request $request, array $params): \Social\Http\Response => $ads->show($request, $params['id']), ['auth' => true]);
+    $router->patch('/api/v1/ads/campaigns/{id}', fn (Request $request, array $params): \Social\Http\Response => $ads->update($request, $params['id']), ['auth' => true]);
+    $router->post('/api/v1/ads/campaigns/{id}/creatives', fn (Request $request, array $params): \Social\Http\Response => $ads->creative($request, $params['id']), ['auth' => true]);
+    $router->get('/api/v1/ads/campaigns/{id}/stats', fn (Request $request, array $params): \Social\Http\Response => $ads->stats($request, $params['id']), ['auth' => true]);
+
     $router->post('/api/v1/reports', fn (Request $request): \Social\Http\Response => $reports->store($request), ['auth' => true]);
 
     $router->get('/api/v1/admin/stats', fn (Request $request): \Social\Http\Response => $admin->stats(), ['auth' => true, 'role' => ['admin', 'moderator']]);
@@ -121,4 +162,9 @@ return function (App $app, Router $router): void {
     $router->post('/api/v1/admin/reports/{id}/resolve', fn (Request $request, array $params): \Social\Http\Response => $admin->resolveReport($request, $params['id']), ['auth' => true, 'role' => ['admin', 'moderator']]);
     $router->post('/api/v1/admin/videos/{id}/takedown', fn (Request $request, array $params): \Social\Http\Response => $admin->takedown($params['id']), ['auth' => true, 'role' => ['admin', 'moderator']]);
     $router->post('/api/v1/admin/videos/{id}/restore', fn (Request $request, array $params): \Social\Http\Response => $admin->restore($params['id']), ['auth' => true, 'role' => ['admin', 'moderator']]);
+    $router->get('/api/v1/admin/licenses', fn (Request $request): \Social\Http\Response => $licenses->index($request), ['auth' => true, 'role' => ['admin']]);
+    $router->post('/api/v1/admin/licenses', fn (Request $request): \Social\Http\Response => $licenses->issue($request), ['auth' => true, 'role' => ['admin']]);
+    $router->post('/api/v1/admin/licenses/{id}/revoke', fn (Request $request, array $params): \Social\Http\Response => $licenses->revoke($params['id']), ['auth' => true, 'role' => ['admin']]);
+    $router->post('/api/v1/admin/subscriptions', fn (Request $request): \Social\Http\Response => $premium->grant($request), ['auth' => true, 'role' => ['admin']]);
+    $router->post('/api/v1/admin/ads/{id}/status', fn (Request $request, array $params): \Social\Http\Response => $ads->adminStatus($request, $params['id']), ['auth' => true, 'role' => ['admin', 'moderator']]);
 };
