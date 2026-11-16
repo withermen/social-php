@@ -1,0 +1,107 @@
+<?php
+
+use Social\App;
+use Social\Exceptions\ApiException;
+use Social\Http\Request;
+use Social\Support\Config;
+use Social\Support\Str;
+
+require __DIR__ . '/../autoload.php';
+
+$app = new App(Config::load(__DIR__ . '/../config/social.php'));
+$command = $argv[1] ?? 'help';
+
+try {
+    switch ($command) {
+        case 'migrate':
+            $app->db()->migrate();
+            echo 'Database is up to date.' . PHP_EOL;
+            break;
+
+        case 'create-admin':
+            $username = $argv[2] ?? '';
+            $email = $argv[3] ?? '';
+            $password = $argv[4] ?? '';
+            $display = $argv[5] ?? $username;
+
+            if ($username === '' || $email === '' || $password === '') {
+                throw new RuntimeException('Usage: php bin/social create-admin <username> <email> <password> [display name]');
+            }
+
+            $request = new Request('POST', '/api/v1/auth/register', [], [], '', [], ['REMOTE_ADDR' => '127.0.0.1']);
+            $result = $app->auth()->register([
+                'username' => $username,
+                'email' => $email,
+                'password' => $password,
+                'display_name' => $display,
+            ], $request);
+            $app->db()->update('users', ['role' => 'admin', 'email_verified_at' => Str::now()], 'id = ?', [$result['user']['id']]);
+            echo 'Admin created: @' . $result['user']['username'] . PHP_EOL;
+            break;
+
+        case 'seed':
+            $accounts = [
+                ['alice', 'alice@example.com', 'password123', 'Alice'],
+                ['bob', 'bob@example.com', 'password123', 'Bob'],
+                ['charlie', 'charlie@example.com', 'password123', 'Charlie'],
+            ];
+            $request = new Request('POST', '/api/v1/auth/register', [], [], '', [], ['REMOTE_ADDR' => '127.0.0.1']);
+
+            foreach ($accounts as [$username, $email, $password, $display]) {
+                try {
+                    $result = $app->auth()->register([
+                        'username' => $username,
+                        'email' => $email,
+                        'password' => $password,
+                        'display_name' => $display,
+                    ], $request);
+                    echo 'Created @' . $result['user']['username'] . PHP_EOL;
+                } catch (ApiException $exception) {
+                    echo 'Skipped @' . $username . ': ' . $exception->getMessage() . PHP_EOL;
+                }
+            }
+
+            $alice = $app->users()->byUsername('alice');
+            $bob = $app->users()->byUsername('bob');
+            $charlie = $app->users()->byUsername('charlie');
+            $app->users()->follow($bob, 'alice');
+            $app->users()->follow($charlie, 'alice');
+            $app->users()->follow($alice, 'bob');
+            echo 'Demo accounts ready with password: password123' . PHP_EOL;
+            break;
+
+        case 'prune':
+            $tokens = $app->db()->run('DELETE FROM refresh_tokens WHERE expires_at < ? OR revoked_at < ?', [Str::now(-86400), Str::now(-604800)]);
+            $verifications = $app->db()->run('DELETE FROM verification_tokens WHERE expires_at < ?', [Str::now(-86400)]);
+            $limits = $app->db()->run('DELETE FROM rate_limits WHERE window_start < ?', [time() - 86400]);
+            $sessions = $app->db()->run("DELETE FROM upload_sessions WHERE status = 'aborted' AND updated_at < ?", [Str::now(-86400)]);
+            $notifications = $app->db()->run('DELETE FROM notifications WHERE created_at < ?', [Str::now(-7776000)]);
+            echo 'Pruned tokens: ' . $tokens->rowCount()
+                . ', verifications: ' . $verifications->rowCount()
+                . ', rate limits: ' . $limits->rowCount()
+                . ', uploads: ' . $sessions->rowCount()
+                . ', notifications: ' . $notifications->rowCount() . PHP_EOL;
+            break;
+
+        case 'stats':
+            $stats = $app->admin()->stats();
+            echo json_encode($stats, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            break;
+
+        case 'help':
+            echo 'SocialPHP CLI' . PHP_EOL
+                . '  php bin/social migrate' . PHP_EOL
+                . '  php bin/social seed' . PHP_EOL
+                . '  php bin/social create-admin <username> <email> <password> [display name]' . PHP_EOL
+                . '  php bin/social prune' . PHP_EOL
+                . '  php bin/social stats' . PHP_EOL;
+            break;
+
+        default:
+            fwrite(STDERR, 'Unknown command: ' . $command . PHP_EOL);
+            exit(1);
+    }
+} catch (Throwable $exception) {
+    fwrite(STDERR, $exception->getMessage() . PHP_EOL);
+    exit(1);
+}
