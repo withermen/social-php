@@ -35,6 +35,10 @@ final class LicenseController extends Controller
             throw new ValidationException(['installation_id' => 'Installation id is required.']);
         }
 
+        if ($this->app->remoteLicense()->remoteRequired()) {
+            return Response::data($this->app->remoteLicense()->activate($key));
+        }
+
         $ipHash = \Social\Support\Str::ipHash($request->ip($this->app->trustProxy()), (string) $this->app->config()->get('app.key'));
 
         return Response::data($this->app->licenses()->activate($key, $installation, $request->input('domain'), $ipHash));

@@ -133,6 +133,10 @@ final class FeedService
 
     private function ranked(?array $user, int $page, int $perPage, bool $affinity, int $windowDays, string $name, ?string $format = null, ?string $sessionId = null): array
     {
+        if (!$this->app->licenses()->feature('advanced_recommendations')) {
+            return $this->basicRanked($user, $page, $perPage, $windowDays, $name, $format, $sessionId);
+        }
+
         $format = $this->app->platform()->formatFilter($format);
         $rows = $this->candidates($user, $windowDays, $format);
         $sessionId = $this->sessionId($sessionId);
@@ -174,6 +178,44 @@ final class FeedService
                 'format' => $format,
                 'candidates' => $total,
             ]),
+            'session_id' => $sessionId,
+        ];
+    }
+
+    private function basicRanked(?array $user, int $page, int $perPage, int $windowDays, string $name, ?string $format, ?string $sessionId): array
+    {
+        $format = $this->app->platform()->formatFilter($format);
+        $limit = max($perPage, (int) $this->app->config()->get('feed.candidate_limit', 240));
+        $rows = $this->fetchRows($this->recentIds($user, $windowDays, $format, $limit));
+        $offset = ($page - 1) * $perPage;
+        $total = count($rows);
+        $sliced = array_slice($rows, $offset, $perPage);
+        $items = $this->app->videos()->payloads($sliced, $user['id'] ?? null);
+        $sessionId = $this->sessionId($sessionId);
+
+        foreach ($items as &$item) {
+            $item['recommendation'] = [
+                'score' => 0.0,
+                'mode' => 'basic',
+                'reasons' => ['fresh'],
+            ];
+        }
+
+        unset($item);
+        $this->app->recommendations()->recordImpressions($user, $items, $sessionId, $name);
+
+        return [
+            'items' => $items,
+            'pagination' => $this->pagination($page, $perPage, $total),
+            'algorithm' => [
+                'name' => $name,
+                'mode' => 'basic',
+                'plan' => $this->app->licenses()->planCode(),
+                'window_days' => $windowDays,
+                'format' => $format,
+                'candidates' => $total,
+                'signals' => ['freshness', 'engagement'],
+            ],
             'session_id' => $sessionId,
         ];
     }

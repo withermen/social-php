@@ -129,7 +129,7 @@ return function (App $app, Router $router): void {
     $router->post('/api/v1/conversations/{id}/read', fn (Request $request, array $params): \Social\Http\Response => $messages->read($request, $params['id']), ['auth' => true]);
 
     $router->get('/api/v1/license/plans', fn (Request $request): \Social\Http\Response => $licenses->plans());
-    $router->get('/api/v1/license/status', fn (Request $request): \Social\Http\Response => $licenses->status(), ['auth' => true, 'role' => ['admin']]);
+    $router->get('/api/v1/license/status', fn (Request $request): \Social\Http\Response => $licenses->status());
     $router->post('/api/v1/license/activate', fn (Request $request): \Social\Http\Response => $licenses->activate($request));
     $router->post('/api/v1/license/checkout', fn (Request $request): \Social\Http\Response => $licenses->checkout($request));
     $router->post('/api/v1/license/webhook', fn (Request $request): \Social\Http\Response => $licenses->webhook($request));

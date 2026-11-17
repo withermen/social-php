@@ -51,6 +51,50 @@ final class LicenseService
     {
         $enforcement = $this->enforcement();
         $enabled = (bool) $this->app->config()->get('licensing.enabled', false);
+        $remote = $this->app->remoteLicense();
+        $plan = $remote->plan();
+        $mode = $remote->mode();
+
+        if ($plan === 'free') {
+            return [
+                'required' => false,
+                'enabled' => $enabled,
+                'enforcement' => $enforcement,
+                'mode' => $mode,
+                'plan' => $plan,
+                'provided' => false,
+                'valid' => true,
+                'licensed' => false,
+                'holder' => null,
+                'expires_at' => null,
+                'error' => null,
+                'features' => $remote->features(),
+                'remote' => null,
+                'plans' => $this->plans(),
+            ];
+        }
+
+        if ($remote->remoteRequired()) {
+            $remoteStatus = $remote->status();
+
+            return [
+                'required' => true,
+                'enabled' => $enabled,
+                'enforcement' => 'enforce',
+                'mode' => $mode,
+                'plan' => $plan,
+                'provided' => trim((string) $this->app->config()->get('licensing.key', '')) !== '',
+                'valid' => (bool) ($remoteStatus['valid'] ?? false),
+                'licensed' => (bool) ($remoteStatus['valid'] ?? false),
+                'holder' => $remoteStatus['payload']['holder_name'] ?? null,
+                'expires_at' => $remoteStatus['expires_at'] ?? null,
+                'error' => $remoteStatus['error'] ?? (($remoteStatus['valid'] ?? false) ? null : 'license_not_verified'),
+                'features' => $remote->features(),
+                'remote' => $remoteStatus,
+                'plans' => $this->plans(),
+            ];
+        }
+
         $key = trim((string) $this->app->config()->get('licensing.key', ''));
         $verified = $key !== '' ? $this->verify($key) : null;
         $required = $enabled && $enforcement !== 'off';
@@ -60,19 +104,37 @@ final class LicenseService
             'required' => $required,
             'enabled' => $enabled,
             'enforcement' => $enforcement,
+            'mode' => $mode,
             'provided' => $key !== '',
             'valid' => $valid,
             'licensed' => (bool) ($verified['valid'] ?? false),
-            'plan' => $verified['plan'] ?? null,
+            'plan' => $verified['plan'] ?? $plan,
             'holder' => $verified['holder_name'] ?? null,
             'expires_at' => $verified['expires_at'] ?? null,
             'error' => $verified['error'] ?? ($required && $key === '' ? 'license_key_missing' : null),
+            'features' => $remote->features(),
+            'remote' => null,
             'plans' => $this->plans(),
         ];
     }
 
     public function guard(): array
     {
+        $remote = $this->app->remoteLicense();
+
+        if ($remote->isFree()) {
+            return $this->status();
+        }
+
+        if ($remote->remoteRequired()) {
+            $status = $remote->guard();
+
+            return array_merge($this->status(), [
+                'valid' => (bool) ($status['valid'] ?? false),
+                'remote' => $status,
+            ]);
+        }
+
         $status = $this->status();
 
         if ($status['required'] && !$status['valid']) {
@@ -90,6 +152,21 @@ final class LicenseService
         }
 
         return $status;
+    }
+
+    public function planCode(): string
+    {
+        return $this->app->remoteLicense()->plan();
+    }
+
+    public function feature(string $name): bool
+    {
+        return $this->app->remoteLicense()->feature($name);
+    }
+
+    public function requireFeature(string $name): void
+    {
+        $this->app->remoteLicense()->requireFeature($name);
     }
 
     public function enforcement(): string

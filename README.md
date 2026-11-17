@@ -639,6 +639,43 @@ Test paketi geçici bir veritabanı ve depolama alanı oluşturur. Kayıt, giri�
 - Ticari kullanım için `LICENSING_ENABLED=true` ve `LICENSING_ENFORCEMENT=enforce` yapılandırıldı.
 - Ödeme ve lisans webhook sırları güçlü ve yalnızca sunucuda tanımlı.
 
-## Lisans
+## Planlar ve Lisans
 
-Kod MIT lisanslıdır; ayrıntılar için `LICENSE` dosyasına bakın. Ticari kullanım için yerleşik lisans sistemi anahtar üretir, aktivasyonları sınırlar ve `enforce` modunda lisanssız çalışmayı engeller.
+Kurulum iki planla çalışır:
+
+| Plan | Reklam | Gelişmiş algoritma | Kısa video | Uzak lisans |
+| --- | --- | --- | --- | --- |
+| `free` | Kapalı | Kapalı | Kapalı | Gerekmez |
+| `commercial` | Açık | Açık | Açık | Zorunlu |
+
+Plan seçimi:
+
+```bash
+php bin/social install --plan=free
+php bin/social install --plan=commercial --domain=ornek.com \
+  --server=https://kerem.site/api/lisans \
+  --public-key=BASE64_PUBLIC_KEY
+```
+
+Ticari lisans aylık 100 TL'dir ve 30 gün geçerlidir. Lisans sunucusu `license-server/` klasöründedir; `kerem.site/api/lisans` altına yüklenir. Ayrıntılar için `license-server/README.md` dosyasına bakın.
+
+Ticari planda:
+
+1. `php bin/social license-key SOC-XXXX-XXXX-XXXX-XXXX`
+2. `php bin/social license-check`
+
+Lisans; domain ve kurulum kimliğine bağlanır. Doğrulama yanıtı RSA-SHA256 ile imzalanır, nonce ve zaman damgası kontrol edilir. Varsayılan olarak 6 saatte bir, hata durumunda en fazla 5 denemede sistem kilitlenir. Kilitliyken yalnızca `/api/v1/license/*` uçları açıktır; geçerli anahtar girilince sistem tekrar açılır. Veri veya kod silinmez.
+
+Free planda `/feed/shorts` 402 döner, kısa video yüklemesi reddedilir, reklam servis edilmez ve akışlar gelişmiş retention sıralaması yerine temel kronolojik sıralamayı kullanır.
+
+İsteğe bağlı dosya bütünlüğü kontrolü:
+
+```bash
+php bin/social integrity
+```
+
+`LICENSE_INTEGRITY=true` yapıldığında `src/`, `config/` ve `bin/` dosyalarının özeti `storage/app/integrity.json` ile karşılaştırılır. Değişiklik varsa sistem kilitlenir. Kod güncellemelerinden sonra `php bin/social integrity` tekrar çalıştırılmalıdır.
+
+> PHP kaynak kodu, çalışması için sunucuda çözülmek zorunda olduğundan tek başına "şifreleme" ile kalıcı olarak gizlenemez. En güçlü koruma; sunucu tarafı lisans doğrulaması, domain bağlama, imzalı yanıtlar ve dosya bütünlüğü kontrolüdür. Kaynak kodun gerçekten şifrelenmesi gerekiyorsa ionCube veya SourceGuardian gibi bir PHP encoder kullanılmalıdır.
+
+Kod MIT lisanslıdır; ayrıntılar için `LICENSE` dosyasına bakın. Ticari kullanım için yukarıdaki `commercial` plan ve uzak lisans zorunludur.

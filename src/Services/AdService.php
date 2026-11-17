@@ -16,6 +16,7 @@ final class AdService
 
     public function createCampaign(array $user, array $data): array
     {
+        $this->app->licenses()->requireFeature('ads');
         $clean = Validator::validate($data, [
             'name' => 'required|string:1,120',
             'placement' => 'nullable|in:feed,explore,all',
@@ -237,6 +238,10 @@ final class AdService
     public function serve(?array $user, string $placement, ?string $videoId, string $ipHash): array
     {
         $placement = in_array($placement, ['feed', 'explore'], true) ? $placement : 'feed';
+
+        if (!$this->app->licenses()->feature('ads')) {
+            return ['ad' => null, 'reason' => 'plan_feature_disabled'];
+        }
 
         if (!(bool) $this->app->config()->get('ads.enabled', true)) {
             return ['ad' => null, 'reason' => 'disabled'];

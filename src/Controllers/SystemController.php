@@ -53,9 +53,12 @@ final class SystemController extends Controller
         return Response::data(array_merge($this->app->platform()->info(), [
             'features' => [
                 'content_analysis' => (bool) $this->app->config()->get('analysis.enabled', true),
-                'ads' => (bool) $this->app->config()->get('ads.enabled', true),
-                'premium' => true,
+                'ads' => (bool) $this->app->config()->get('ads.enabled', true) && $this->app->licenses()->feature('ads'),
+                'premium' => $this->app->licenses()->feature('premium'),
+                'advanced_recommendations' => $this->app->licenses()->feature('advanced_recommendations'),
+                'short_video' => $this->app->licenses()->feature('short_video'),
                 'licensing' => $this->app->licenses()->status()['required'],
+                'plan' => $this->app->licenses()->planCode(),
             ],
             'feed_formats' => ['short', 'long', 'all'],
             'analysis' => [

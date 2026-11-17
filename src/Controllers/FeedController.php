@@ -34,6 +34,7 @@ final class FeedController extends Controller
 
     public function shorts(Request $request): Response
     {
+        $this->app->licenses()->requireFeature('short_video');
         [$page, $perPage] = Validator::pagination($request->query, 20, 100);
         $result = $this->app->feeds()->forYou($request->user(), $page, $perPage, 'short', $this->sessionId($request));
 

@@ -1,0 +1,186 @@
+<?php
+
+declare(strict_types=1);
+
+use LicenseServer\Server;
+use LicenseServer\Signer;
+use LicenseServer\Store;
+
+$root = dirname(__DIR__);
+require $root . '/lib/Signer.php';
+require $root . '/lib/Store.php';
+require $root . '/lib/Server.php';
+
+function args(array $argv): array
+{
+    $options = [];
+
+    foreach (array_slice($argv, 2) as $argument) {
+        if (str_starts_with($argument, '--')) {
+            $parts = explode('=', substr($argument, 2), 2);
+            $options[$parts[0]] = $parts[1] ?? '1';
+        }
+    }
+
+    return $options;
+}
+
+function configPath(string $root): string
+{
+    return $root . '/config.php';
+}
+
+function loadConfig(string $root): array
+{
+    $path = configPath($root);
+
+    if (!is_file($path)) {
+        fwrite(STDERR, 'config.php not found. Run: php bin/license init' . PHP_EOL);
+        exit(1);
+    }
+
+    return require $path;
+}
+
+function server(array $config): Server
+{
+    $signer = is_file((string) $config['private_key_file'])
+        ? Signer::fromBase64(trim((string) file_get_contents((string) $config['private_key_file'])))
+        : null;
+
+    return new Server($config, new Store((string) $config['database']), $signer);
+}
+
+$command = $argv[1] ?? 'help';
+
+try {
+    switch ($command) {
+        case 'init':
+            $path = configPath($root);
+
+            if (!is_file($root . '/config.php')) {
+                copy($root . '/config.example.php', $path);
+            }
+
+            $config = require $path;
+            $data = dirname((string) $config['database']);
+
+            if (!is_dir($data)) {
+                mkdir($data, 0775, true);
+            }
+
+            if (!is_file((string) $config['private_key_file']) || !is_file((string) $config['public_key_file'])) {
+                [$private, $public] = Signer::generate();
+                file_put_contents((string) $config['private_key_file'], $private);
+                chmod((string) $config['private_key_file'], 0600);
+                file_put_contents((string) $config['public_key_file'], $public);
+            }
+
+            $contents = file_get_contents($path);
+            $token = bin2hex(random_bytes(32));
+
+            if (str_contains((string) $contents, 'replace-with-a-long-random-admin-token')) {
+                $contents = str_replace('replace-with-a-long-random-admin-token', $token, (string) $contents);
+                file_put_contents($path, $contents);
+            } else {
+                $token = (string) ($config['admin_token'] ?? '');
+            }
+
+            new Store((string) $config['database']);
+            echo 'License server initialized.' . PHP_EOL;
+            echo 'Admin token: ' . $token . PHP_EOL;
+            echo 'Public key (base64): ' . trim((string) file_get_contents((string) $config['public_key_file'])) . PHP_EOL;
+            echo 'Client env: LICENSE_SERVER_PUBLIC_KEY=' . trim((string) file_get_contents((string) $config['public_key_file'])) . PHP_EOL;
+            break;
+
+        case 'issue':
+            $config = loadConfig($root);
+            $options = args($argv);
+            $body = [
+                'plan' => $options['plan'] ?? 'monthly',
+                'email' => $options['email'] ?? '',
+                'holder_name' => $options['name'] ?? null,
+                'domain' => $options['domain'] ?? '',
+                'duration_days' => isset($options['days']) ? (int) $options['days'] : null,
+                'max_activations' => isset($options['activations']) ? (int) $options['activations'] : null,
+            ];
+            [$status, $payload] = server($config)->handle('POST', '/admin/issue', $body, ['x-admin-token' => (string) $config['admin_token']], '127.0.0.1');
+
+            if ($status !== 200 || !($payload['ok'] ?? false)) {
+                fwrite(STDERR, json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT) . PHP_EOL);
+                exit(1);
+            }
+
+            echo 'License key: ' . $payload['data']['key'] . PHP_EOL;
+            echo 'Plan: ' . $payload['data']['license']['plan'] . PHP_EOL;
+            echo 'Domain: ' . ($payload['data']['license']['domain'] ?? '*') . PHP_EOL;
+            echo 'Expires: ' . ($payload['data']['license']['expires_at'] ?? 'never') . PHP_EOL;
+            break;
+
+        case 'list':
+            $config = loadConfig($root);
+            [$status, $payload] = server($config)->handle('GET', '/admin/licenses', [], ['x-admin-token' => (string) $config['admin_token']], '127.0.0.1');
+
+            if ($status !== 200 || !($payload['ok'] ?? false)) {
+                fwrite(STDERR, json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT) . PHP_EOL);
+                exit(1);
+            }
+
+            foreach ((array) $payload['data']['licenses'] as $license) {
+                echo $license['license_id'] . ' | ' . $license['plan'] . ' | ' . ($license['domain'] ?? '*') . ' | ' . $license['status'] . ' | ' . ($license['expires_at'] ?? 'never') . PHP_EOL;
+            }
+            break;
+
+        case 'revoke':
+            $config = loadConfig($root);
+            $options = args($argv);
+            $id = (string) ($options['id'] ?? '');
+
+            if ($id === '') {
+                fwrite(STDERR, 'Usage: php bin/license revoke --id=<license_id>' . PHP_EOL);
+                exit(1);
+            }
+
+            [$status, $payload] = server($config)->handle('POST', '/admin/revoke', ['license_id' => $id], ['x-admin-token' => (string) $config['admin_token']], '127.0.0.1');
+
+            if ($status !== 200 || !($payload['ok'] ?? false)) {
+                fwrite(STDERR, json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT) . PHP_EOL);
+                exit(1);
+            }
+
+            echo 'Revoked: ' . $payload['data']['license_id'] . PHP_EOL;
+            break;
+
+        case 'stats':
+            $config = loadConfig($root);
+            [$status, $payload] = server($config)->handle('GET', '/admin/stats', [], ['x-admin-token' => (string) $config['admin_token']], '127.0.0.1');
+
+            if ($status !== 200 || !($payload['ok'] ?? false)) {
+                fwrite(STDERR, json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT) . PHP_EOL);
+                exit(1);
+            }
+
+            echo json_encode($payload['data'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            break;
+
+        case 'keys':
+            $config = loadConfig($root);
+            echo 'Admin token: ' . $config['admin_token'] . PHP_EOL;
+            echo 'Public key (base64): ' . trim((string) file_get_contents((string) $config['public_key_file'])) . PHP_EOL;
+            break;
+
+        case 'help':
+        default:
+            echo 'SocialPHP License Server' . PHP_EOL
+                . '  php bin/license init' . PHP_EOL
+                . '  php bin/license issue --email=you@example.com --domain=example.com [--plan=monthly] [--days=30] [--activations=1]' . PHP_EOL
+                . '  php bin/license list' . PHP_EOL
+                . '  php bin/license revoke --id=<license_id>' . PHP_EOL
+                . '  php bin/license stats' . PHP_EOL
+                . '  php bin/license keys' . PHP_EOL;
+            break;
+    }
+} catch (Throwable $exception) {
+    fwrite(STDERR, $exception->getMessage() . PHP_EOL);
+    exit(1);
+}

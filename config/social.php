@@ -9,7 +9,7 @@ Env::load($basePath . '/.env');
 return [
     'app' => [
         'name' => Env::string('APP_NAME', 'SocialPHP'),
-        'version' => '1.1.0',
+        'version' => '1.2.0',
         'env' => Env::string('APP_ENV', 'local'),
         'debug' => Env::bool('APP_DEBUG', true),
         'url' => rtrim(Env::string('APP_URL', 'http://localhost:8000'), '/'),
@@ -195,13 +195,34 @@ return [
     ],
     'licensing' => [
         'enabled' => Env::bool('LICENSING_ENABLED', false),
+        'mode' => Env::string('LICENSING_MODE', 'local'),
+        'plan' => Env::string('SOCIAL_PLAN', 'commercial'),
         'enforcement' => Env::string('LICENSING_ENFORCEMENT', 'off'),
         'key' => Env::string('LICENSE_KEY', ''),
         'public_key' => Env::string('LICENSE_PUBLIC_KEY', ''),
         'private_key' => Env::string('LICENSE_PRIVATE_KEY', ''),
+        'server_url' => rtrim(Env::string('LICENSE_SERVER_URL', ''), '/'),
+        'server_public_key' => Env::string('LICENSE_SERVER_PUBLIC_KEY', ''),
+        'installation_id' => Env::string('LICENSE_INSTALLATION_ID', ''),
+        'domain' => Env::string('LICENSE_DOMAIN', ''),
+        'check_interval' => Env::int('LICENSE_CHECK_INTERVAL', 21600),
+        'grace_hours' => Env::int('LICENSE_GRACE_HOURS', 72),
+        'max_failures' => Env::int('LICENSE_MAX_FAILURES', 5),
+        'timeout' => Env::int('LICENSE_TIMEOUT', 10),
+        'integrity' => Env::bool('LICENSE_INTEGRITY', false),
+        'integrity_manifest' => Env::string('LICENSE_INTEGRITY_MANIFEST', $basePath . '/storage/app/integrity.json'),
         'issuer' => Env::string('LICENSE_ISSUER', 'SocialPHP'),
         'webhook_secret' => Env::string('LICENSE_WEBHOOK_SECRET', ''),
         'plans' => [
+            'monthly' => [
+                'name' => 'Aylik Ticari Lisans',
+                'description' => 'Tek domain icin aylik ticari kullanim lisansi.',
+                'price_cents' => Env::int('LICENSE_MONTHLY_PRICE_CENTS', 10000),
+                'currency' => Env::string('LICENSE_MONTHLY_CURRENCY', 'TRY'),
+                'duration_days' => Env::int('LICENSE_MONTHLY_DURATION_DAYS', 30),
+                'max_activations' => Env::int('LICENSE_MONTHLY_MAX_ACTIVATIONS', 1),
+                'features' => ['commercial_use', 'ads', 'advanced_recommendations', 'short_video', 'premium', 'updates', 'email_support'],
+            ],
             'commercial' => [
                 'name' => 'Commercial',
                 'description' => 'Commercial use for one product or client project.',

@@ -18,6 +18,7 @@ use Social\Services\AdService;
 use Social\Services\AnalysisService;
 use Social\Services\CommentService;
 use Social\Services\FeedService;
+use Social\Services\IntegrityService;
 use Social\Services\LicenseService;
 use Social\Services\MessageService;
 use Social\Services\NotificationService;
@@ -25,6 +26,7 @@ use Social\Services\PlatformService;
 use Social\Services\PremiumService;
 use Social\Services\RateLimiter;
 use Social\Services\RecommendationService;
+use Social\Services\RemoteLicenseClient;
 use Social\Services\ReportService;
 use Social\Services\SearchService;
 use Social\Services\UploadService;
@@ -104,6 +106,7 @@ final class App
 
         try {
             if (!$licenseExempt) {
+                $this->integrity()->guard();
                 $licenseStatus = $this->licenses()->guard();
             }
 
@@ -282,6 +285,16 @@ final class App
     public function licenses(): LicenseService
     {
         return $this->services[LicenseService::class] ??= new LicenseService($this);
+    }
+
+    public function remoteLicense(): RemoteLicenseClient
+    {
+        return $this->services[RemoteLicenseClient::class] ??= new RemoteLicenseClient($this);
+    }
+
+    public function integrity(): IntegrityService
+    {
+        return $this->services[IntegrityService::class] ??= new IntegrityService($this);
     }
 
     public function premium(): PremiumService

@@ -8,6 +8,47 @@ use Social\Support\Str;
 
 require __DIR__ . '/../autoload.php';
 
+function writeEnvValues(string $path, array $values): void
+{
+    if (!is_file($path)) {
+        $template = __DIR__ . '/../.env.example';
+        file_put_contents($path, is_file($template) ? file_get_contents($template) : '');
+    }
+
+    $lines = file($path, FILE_IGNORE_NEW_LINES) ?: [];
+    $remaining = $values;
+
+    foreach ($lines as $index => $line) {
+        if (!str_contains($line, '=') || str_starts_with(trim($line), '#')) {
+            continue;
+        }
+
+        $name = trim(substr($line, 0, strpos($line, '=')));
+
+        if (array_key_exists($name, $values)) {
+            $lines[$index] = $name . '=' . $values[$name];
+            unset($remaining[$name]);
+        }
+    }
+
+    foreach ($remaining as $name => $value) {
+        $lines[] = $name . '=' . $value;
+    }
+
+    file_put_contents($path, implode(PHP_EOL, $lines) . PHP_EOL);
+}
+
+function cliOption(array $argv, string $name, ?string $default = null): ?string
+{
+    foreach (array_slice($argv, 2) as $argument) {
+        if (str_starts_with($argument, '--' . $name . '=')) {
+            return substr($argument, strlen($name) + 3);
+        }
+    }
+
+    return $default;
+}
+
 $app = new App(Config::load(__DIR__ . '/../config/social.php'));
 $command = $argv[1] ?? 'help';
 
@@ -88,9 +129,72 @@ try {
             echo json_encode($stats, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
             break;
 
+        case 'install':
+        case 'plan':
+            $plan = strtolower((string) cliOption($argv, 'plan', $command === 'plan' ? ($argv[2] ?? 'free') : 'free'));
+
+            if (!in_array($plan, ['free', 'commercial'], true)) {
+                throw new RuntimeException('Plan must be free or commercial.');
+            }
+
+            $values = [
+                'SOCIAL_PLAN' => $plan,
+                'LICENSING_MODE' => $plan === 'free' ? 'off' : 'remote',
+                'LICENSING_ENABLED' => $plan === 'free' ? 'false' : 'true',
+                'LICENSING_ENFORCEMENT' => $plan === 'free' ? 'off' : 'enforce',
+            ];
+
+            if ($plan === 'free') {
+                $values['ADS_ENABLED'] = 'false';
+                $values['PLATFORM_MODE'] = 'long';
+            }
+
+            foreach (['domain' => 'LICENSE_DOMAIN', 'server' => 'LICENSE_SERVER_URL', 'public-key' => 'LICENSE_SERVER_PUBLIC_KEY', 'key' => 'LICENSE_KEY'] as $option => $envName) {
+                $value = cliOption($argv, $option);
+
+                if ($value !== null && $value !== '') {
+                    $values[$envName] = $value;
+                }
+            }
+
+            writeEnvValues(__DIR__ . '/../.env', $values);
+            echo 'Plan set to ' . $plan . '. Restart the service for changes to apply.' . PHP_EOL;
+
+            if ($plan === 'commercial') {
+                echo 'Required: LICENSE_SERVER_URL, LICENSE_SERVER_PUBLIC_KEY, LICENSE_DOMAIN, LICENSE_KEY.' . PHP_EOL;
+            }
+
+            break;
+
+        case 'license-key':
+            $key = trim((string) ($argv[2] ?? ''));
+
+            if ($key === '') {
+                throw new RuntimeException('Usage: php bin/social license-key <license key>');
+            }
+
+            writeEnvValues(__DIR__ . '/../.env', ['LICENSE_KEY' => $key]);
+            echo 'License key saved. Run: php bin/social license-check' . PHP_EOL;
+            break;
+
+        case 'integrity':
+            $manifest = $app->integrity()->build();
+            echo 'Integrity manifest written: ' . count($manifest['files']) . ' files.' . PHP_EOL;
+            break;
+
+        case 'license-check':
+            $result = $app->remoteLicense()->refresh(true);
+            echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            break;
+
         case 'help':
             echo 'SocialPHP CLI' . PHP_EOL
                 . '  php bin/social migrate' . PHP_EOL
+                . '  php bin/social install --plan=free|commercial [--domain=example.com] [--server=https://kerem.site/api/lisans] [--public-key=BASE64] [--key=LICENSE-KEY]' . PHP_EOL
+                . '  php bin/social plan free|commercial' . PHP_EOL
+                . '  php bin/social license-key <license key>' . PHP_EOL
+                . '  php bin/social license-check' . PHP_EOL
+                . '  php bin/social integrity' . PHP_EOL
                 . '  php bin/social seed' . PHP_EOL
                 . '  php bin/social create-admin <username> <email> <password> [display name]' . PHP_EOL
                 . '  php bin/social prune' . PHP_EOL

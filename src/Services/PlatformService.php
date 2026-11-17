@@ -15,6 +15,10 @@ final class PlatformService
 
     public function mode(): string
     {
+        if (!$this->app->licenses()->feature('short_video')) {
+            return 'long';
+        }
+
         $mode = strtolower((string) $this->app->config()->get('platform.mode', 'hybrid'));
 
         return in_array($mode, self::MODES, true) ? $mode : 'hybrid';
@@ -69,6 +73,10 @@ final class PlatformService
         $format = strtolower(trim((string) $format));
 
         if (in_array($format, ['short', 'shorts'], true)) {
+            if (!$this->app->licenses()->feature('short_video')) {
+                $this->app->licenses()->requireFeature('short_video');
+            }
+
             return 'short';
         }
 
@@ -112,6 +120,8 @@ final class PlatformService
             'short_max_duration' => $this->shortMax(),
             'long_min_duration' => $this->longMin(),
             'enforce_upload_mode' => (bool) $this->app->config()->get('platform.enforce_upload_mode', true),
+            'short_video' => $this->app->licenses()->feature('short_video'),
+            'plan' => $this->app->licenses()->planCode(),
         ];
     }
 }

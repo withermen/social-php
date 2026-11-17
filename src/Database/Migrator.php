@@ -677,6 +677,28 @@ final class Migrator
                     'license_activations_installation_idx' => ['installation_id'],
                 ],
             ],
+            'license_state' => [
+                'columns' => [
+                    'id' => 'VARCHAR(32) NOT NULL',
+                    'plan' => 'VARCHAR(20) NOT NULL',
+                    'status' => 'VARCHAR(20) NOT NULL',
+                    'license_id' => 'VARCHAR(64) NULL',
+                    'domain' => 'VARCHAR(190) NULL',
+                    'installation_id' => 'VARCHAR(120) NULL',
+                    'verified_at' => 'VARCHAR(32) NULL',
+                    'expires_at' => 'VARCHAR(32) NULL',
+                    'next_check_at' => 'VARCHAR(32) NULL',
+                    'payload' => 'TEXT NULL',
+                    'signature' => 'TEXT NULL',
+                    'error' => 'VARCHAR(80) NULL',
+                    'failures' => 'INT NOT NULL DEFAULT 0',
+                    'updated_at' => 'VARCHAR(32) NOT NULL',
+                ],
+                'primary' => ['id'],
+                'indexes' => [
+                    'license_state_status_idx' => ['status', 'next_check_at'],
+                ],
+            ],
             'license_orders' => [
                 'columns' => [
                     'id' => 'VARCHAR(32) NOT NULL',

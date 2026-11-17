@@ -99,7 +99,7 @@ try {
 
     step('api index', function (): void {
         $data = decoded(api('GET', '/'), 200, 'index');
-        expect($data['data']['version'] === '1.1.0', 'version missing');
+        expect($data['data']['version'] === '1.2.0', 'version missing');
     });
 
     step('platform modes and capabilities', function (): void {
@@ -596,7 +596,10 @@ try {
 
     step('commercial license lifecycle', function () use (&$adminToken, &$licenseKey, &$licenseId): void {
         $plans = decoded(api('GET', '/api/v1/license/plans'), 200, 'license plans');
-        expect(count($plans['data']) === 2, 'license plans missing');
+        expect(count($plans['data']) === 3, 'license plans missing');
+        expect($plans['data'][0]['code'] === 'monthly', 'monthly license plan missing');
+        expect($plans['data'][0]['price_cents'] === 10000, 'monthly license price should be 100 TL');
+        expect($plans['data'][0]['currency'] === 'TRY', 'monthly license currency should be TRY');
         expect($plans['data'][0]['price_cents'] > 0, 'license price missing');
         expect($plans['meta']['enforcement'] === 'off', 'license enforcement should be off in tests');
 
@@ -854,6 +857,135 @@ try {
         expect(api('DELETE', '/api/v1/comments/' . $replyId, [], $bobToken)->status === 204, 'delete reply failed');
         expect(api('DELETE', '/api/v1/videos/' . $videoId, [], $bobToken)->status === 204, 'delete video failed');
         expect(api('GET', '/api/v1/videos/' . $videoId)->status === 404, 'deleted video should be hidden');
+    });
+
+    step('license server issuance and domain binding', function () use ($root): void {
+        require_once __DIR__ . '/../license-server/lib/Signer.php';
+        require_once __DIR__ . '/../license-server/lib/Store.php';
+        require_once __DIR__ . '/../license-server/lib/Server.php';
+
+        $directory = $root . '/license-server';
+        mkdir($directory, 0775, true);
+        $config = [
+            'database' => $directory . '/licenses.sqlite',
+            'private_key_file' => $directory . '/private.key',
+            'public_key_file' => $directory . '/public.key',
+            'admin_token' => 'test-admin-token',
+            'rate_limit' => 1000,
+            'check_interval' => 3600,
+            'grace_hours' => 72,
+            'debug' => true,
+            'plans' => [
+                'monthly' => [
+                    'name' => 'Aylik Ticari Lisans',
+                    'price_cents' => 10000,
+                    'currency' => 'TRY',
+                    'duration_days' => 30,
+                    'max_activations' => 1,
+                    'features' => ['ads', 'advanced_recommendations', 'short_video', 'premium', 'commercial_use'],
+                ],
+            ],
+        ];
+        [$private, $public] = \LicenseServer\Signer::generate(2048);
+        file_put_contents($config['private_key_file'], $private);
+        file_put_contents($config['public_key_file'], $public);
+        $signer = \LicenseServer\Signer::fromBase64($private);
+        $server = new \LicenseServer\Server($config, new \LicenseServer\Store($config['database']), $signer);
+        [$status, $issued] = $server->handle('POST', '/admin/issue', [
+            'plan' => 'monthly',
+            'email' => 'buyer@example.com',
+            'domain' => 'example.com',
+            'max_activations' => 1,
+        ], ['x-admin-token' => 'test-admin-token'], '127.0.0.1');
+        expect($status === 200 && ($issued['ok'] ?? false), 'license server issue failed');
+        $key = $issued['data']['key'];
+        $publicPem = base64_decode($public);
+        $signedPayload = [
+            'data' => $issued['data'],
+            'ok' => $issued['ok'],
+            'error' => $issued['error'],
+            'message' => $issued['message'],
+            'ts' => $issued['ts'],
+            'nonce' => $issued['nonce'],
+        ];
+        expect(\LicenseServer\Signer::verify($signedPayload, $issued['sig'], $publicPem), 'license server signature invalid');
+        expect($issued['data']['license']['plan'] === 'monthly', 'monthly plan mismatch');
+        expect($issued['data']['license']['features'] !== [], 'license features missing');
+
+        $nonce = bin2hex(random_bytes(24));
+        [$status, $activated] = $server->handle('POST', '/activate', [
+            'key' => $key,
+            'domain' => 'example.com',
+            'installation_id' => 'install-a',
+            'nonce' => $nonce,
+        ], [], '127.0.0.1');
+        expect($status === 200 && ($activated['data']['valid'] ?? false), 'license activation failed');
+        expect($activated['data']['domain'] === 'example.com', 'activation domain mismatch');
+
+        [$status, $mismatch] = $server->handle('POST', '/activate', [
+            'key' => $key,
+            'domain' => 'other.com',
+            'installation_id' => 'install-a',
+            'nonce' => bin2hex(random_bytes(24)),
+        ], [], '127.0.0.1');
+        expect($status === 403 && $mismatch['error'] === 'domain_mismatch', 'domain binding should be enforced');
+
+        [$status, $verified] = $server->handle('POST', '/verify', [
+            'key' => $key,
+            'domain' => 'example.com',
+            'installation_id' => 'install-a',
+            'nonce' => bin2hex(random_bytes(24)),
+        ], [], '127.0.0.1');
+        expect($status === 200 && ($verified['data']['valid'] ?? false), 'license verification failed');
+
+        $licenseId = $issued['data']['license']['license_id'];
+        [$status, $revoked] = $server->handle('POST', '/admin/revoke', [
+            'license_id' => $licenseId,
+        ], ['x-admin-token' => 'test-admin-token'], '127.0.0.1');
+        expect($status === 200 && $revoked['data']['status'] === 'revoked', 'license revoke failed');
+
+        [$status, $after] = $server->handle('POST', '/verify', [
+            'key' => $key,
+            'domain' => 'example.com',
+            'installation_id' => 'install-a',
+            'nonce' => bin2hex(random_bytes(24)),
+        ], [], '127.0.0.1');
+        expect($status === 403 && $after['error'] === 'license_revoked', 'revoked license should not verify');
+    });
+
+    step('free plan gating', function () use ($root, $config): void {
+        $freeRoot = $root . '/free';
+        mkdir($freeRoot, 0775, true);
+        $freeConfig = $config;
+        $freeConfig['database']['database'] = $freeRoot . '/free.sqlite';
+        $freeConfig['storage']['root'] = $freeRoot . '/storage';
+        $freeConfig['mail']['log_path'] = $freeRoot . '/mail.log';
+        $freeConfig['licensing']['plan'] = 'free';
+        $freeConfig['licensing']['mode'] = 'off';
+        $freeConfig['licensing']['enabled'] = false;
+        $free = new App($freeConfig);
+        $platform = decoded(apiOn($free, 'GET', '/api/v1/platform'), 200, 'free platform');
+        expect($platform['data']['features']['ads'] === false, 'free plan should disable ads');
+        expect($platform['data']['features']['advanced_recommendations'] === false, 'free plan should disable advanced recommendations');
+        expect($platform['data']['features']['short_video'] === false, 'free plan should disable short video');
+        expect($platform['data']['mode'] === 'long', 'free plan should force long video mode');
+        $feed = decoded(apiOn($free, 'GET', '/api/v1/feed/foryou'), 200, 'free feed');
+        expect($feed['meta']['algorithm']['mode'] === 'basic', 'free plan should use basic ranking');
+        expect(apiOn($free, 'GET', '/api/v1/feed/shorts')->status === 402, 'free plan should lock shorts feed');
+        $ad = decoded(apiOn($free, 'GET', '/api/v1/ads/serve'), 200, 'free ads');
+        expect($ad['data'] === null && $ad['meta']['reason'] === 'plan_feature_disabled', 'free plan should not serve ads');
+        $register = decoded(apiOn($free, 'POST', '/api/v1/auth/register', [
+            'username' => 'freeuser',
+            'email' => 'free@example.com',
+            'password' => 'password123',
+            'display_name' => 'Free User',
+        ]), 201, 'free register');
+        $token = $register['data']['access_token'];
+        $upload = apiOn($free, 'POST', '/api/v1/videos', [
+            'title' => 'Short clip',
+            'visibility' => 'public',
+        ], $token, ['video' => UploadedFile::fromPath($root . '/clip.mp4', 'clip.mp4', 'video/mp4')]);
+        expect($upload->status === 400, 'free plan should reject short videos');
     });
 
     echo PHP_EOL . 'All ' . $tests . ' test groups passed.' . PHP_EOL;

@@ -1,0 +1,8 @@
+Options -Indexes
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^ index.php [QSA,L]
+
+<FilesMatch "^(config\.php|config\.example\.php|.*\.sqlite|.*\.key|.*\.log)$">
+    Require all denied
+</FilesMatch>
