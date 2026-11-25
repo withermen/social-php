@@ -1,5 +1,8 @@
 # SocialPHP
 
+#Geçici bilgielndirme:
+-Lisans satışı şuanda durdurulmuştur, önümüzdeki günlerde geri açılacaktır.
+
 Kısa ve uzun video sosyal medya ürünleri için sıfırdan yazılmış, kendi sunucunuzda çalışan PHP backend API'si. Hazır bir UI içermez; siz sadece arayüzü yazarsınız, hesaplar, yüklemeler, akış, yorumlar, bildirimler, mesajlar ve moderasyon bu kütüphane tarafından yönetilir.
 
 - Framework bağımlılığı yok. PHP 8.1+ ve PDO yeterli.
